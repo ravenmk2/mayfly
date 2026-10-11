@@ -93,6 +93,8 @@ type resultCounters struct {
 // namedSource couples a chain source with its label and counters.
 type namedSource struct {
 	name     string
+	cfg      SourceConfig
+	backend  string // db backend name, empty for file sources
 	auth     hook.Authenticator
 	authz    hook.Authorizer
 	counters *resultCounters
@@ -105,10 +107,15 @@ type Manager struct {
 	log          *slog.Logger
 	anonymous    bool
 	interval     time.Duration
+	cfg          Config
 	authSources  []*namedSource
 	authzSources []*namedSource
 	reloads      []func(context.Context) error
 	closers      []io.Closer
+	// db is the shared db source (at most one enabled db source per chain;
+	// a source in both chains is built once), feeding the admin API's user
+	// and ACL management.
+	db *DBSource
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -125,29 +132,32 @@ func NewManager(ctx context.Context, cfg Config, logger *slog.Logger) (*Manager,
 	if logger == nil {
 		logger = slog.Default()
 	}
-	m := &Manager{log: logger, anonymous: cfg.AnonymousAllow, interval: cfg.RefreshInterval}
+	m := &Manager{log: logger, anonymous: cfg.AnonymousAllow, interval: cfg.RefreshInterval, cfg: cfg}
 	if m.interval <= 0 {
 		m.interval = DefaultRefreshInterval
 	}
 
 	// A db source appearing in both chains is built once and shared.
 	dbByDSN := map[string]*DBSource{}
-	buildDB := func(dsn string) *DBSource {
-		if s, ok := dbByDSN[dsn]; ok {
+	buildDB := func(sc SourceConfig) *DBSource {
+		if s, ok := dbByDSN[sc.DSN]; ok {
 			return s
 		}
-		s, err := NewDBSource(ctx, dsn)
+		s, err := NewDBSource(ctx, sc.DSN)
 		if s == nil {
 			// DSN-level errors are configuration errors.
-			m.log.Error("auth db source unusable", "dsn_scheme", dsnScheme(dsn), "error", err)
-			dbByDSN[dsn] = nil
+			m.log.Error("auth db source unusable", "dsn_scheme", dsnScheme(sc.DSN), "error", err)
+			dbByDSN[sc.DSN] = nil
 			return nil
 		}
 		if err != nil {
 			m.log.Warn("auth db source initial load failed; fail-closed until refresh recovers",
 				"backend", s.Backend().String(), "error", err)
 		}
-		dbByDSN[dsn] = s
+		dbByDSN[sc.DSN] = s
+		if m.db == nil {
+			m.db = s
+		}
 		m.reloads = append(m.reloads, s.Reload)
 		m.closers = append(m.closers, s)
 		return s
@@ -164,11 +174,11 @@ func NewManager(ctx context.Context, cfg Config, logger *slog.Logger) (*Manager,
 				m.log.Warn("auth users file initial load failed; fail-closed until refresh recovers",
 					"path", sc.Path, "error", err)
 			}
-			m.authSources = append(m.authSources, &namedSource{name: "file(" + sc.Path + ")", auth: f, counters: &resultCounters{}})
+			m.authSources = append(m.authSources, &namedSource{name: "file(" + sc.Path + ")", cfg: sc, auth: f, counters: &resultCounters{}})
 			m.reloads = append(m.reloads, func(ctx context.Context) error { return f.Reload() })
 		case "db":
-			if s := buildDB(sc.DSN); s != nil {
-				m.authSources = append(m.authSources, &namedSource{name: "db(" + s.Backend().String() + ")", auth: s, counters: &resultCounters{}})
+			if s := buildDB(sc); s != nil {
+				m.authSources = append(m.authSources, &namedSource{name: "db(" + s.Backend().String() + ")", cfg: sc, backend: s.Backend().String(), auth: s, counters: &resultCounters{}})
 			}
 		}
 	}
@@ -183,11 +193,11 @@ func NewManager(ctx context.Context, cfg Config, logger *slog.Logger) (*Manager,
 				m.log.Warn("auth acl file initial load failed; fail-closed until refresh recovers",
 					"path", sc.Path, "error", err)
 			}
-			m.authzSources = append(m.authzSources, &namedSource{name: "file(" + sc.Path + ")", authz: f, counters: &resultCounters{}})
+			m.authzSources = append(m.authzSources, &namedSource{name: "file(" + sc.Path + ")", cfg: sc, authz: f, counters: &resultCounters{}})
 			m.reloads = append(m.reloads, func(ctx context.Context) error { return f.Reload() })
 		case "db":
-			if s := buildDB(sc.DSN); s != nil {
-				m.authzSources = append(m.authzSources, &namedSource{name: "db(" + s.Backend().String() + ")", authz: s, counters: &resultCounters{}})
+			if s := buildDB(sc); s != nil {
+				m.authzSources = append(m.authzSources, &namedSource{name: "db(" + s.Backend().String() + ")", cfg: sc, backend: s.Backend().String(), authz: s, counters: &resultCounters{}})
 			}
 		}
 	}
@@ -325,6 +335,61 @@ func (m *Manager) Stats() []SourceStat {
 			Allow: src.counters.allow.Load(), Deny: src.counters.deny.Load(),
 			Miss: src.counters.miss.Load(), Fail: src.counters.fail.Load(),
 		})
+	}
+	return out
+}
+
+// Config returns the chain configuration the manager was built from. The
+// admin API renders it in GET /api/v1/auth/chains.
+func (m *Manager) Config() Config { return m.cfg }
+
+// DBSource returns the shared db source, nil when no db source is
+// configured. The admin API manages MQTT users and ACL rules through it.
+func (m *Manager) DBSource() *DBSource { return m.db }
+
+// SourceView is one configured chain entry with its runtime state, consumed
+// by the admin API.
+type SourceView struct {
+	SourceConfig
+	// Active reports whether the source is built into the live chain:
+	// enabled and constructible. An enabled source whose initial build
+	// failed (bad DSN) reports Active=false.
+	Active bool
+	// Backend names the db backend ("sqlite"/"mysql"), empty otherwise.
+	Backend string
+	Allow   int64
+	Deny    int64
+	Miss    int64
+	Fail    int64
+}
+
+// Sources reports both configured chains with per-source runtime state,
+// preserving configuration order.
+func (m *Manager) Sources() (authn, authz []SourceView) {
+	return sourceViews(m.cfg.Authentication, m.authSources),
+		sourceViews(m.cfg.Authorization, m.authzSources)
+}
+
+// sourceViews merges one configured chain with its live sources, matching by
+// type and identity (path for file sources, DSN for db sources).
+func sourceViews(cfg []SourceConfig, live []*namedSource) []SourceView {
+	out := make([]SourceView, 0, len(cfg))
+	for _, sc := range cfg {
+		v := SourceView{SourceConfig: sc}
+		if sc.Enabled {
+			for _, ns := range live {
+				if ns.cfg.Type == sc.Type && ns.cfg.Path == sc.Path && ns.cfg.DSN == sc.DSN {
+					v.Active = true
+					v.Backend = ns.backend
+					v.Allow = ns.counters.allow.Load()
+					v.Deny = ns.counters.deny.Load()
+					v.Miss = ns.counters.miss.Load()
+					v.Fail = ns.counters.fail.Load()
+					break
+				}
+			}
+		}
+		out = append(out, v)
 	}
 	return out
 }

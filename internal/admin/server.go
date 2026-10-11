@@ -135,6 +135,37 @@ func (s *Server) RegisterRoutes(e *echo.Echo) {
 	g.POST("/setup/test-db", s.setupTestDB)
 	g.POST("/setup", s.setup)
 
+	g.GET("/status", s.status, s.requireAuth(ScopeRead))
+
+	g.GET("/connections", s.listConnections, s.requireAuth(ScopeRead))
+	g.GET("/connections/:clientID", s.getConnection, s.requireAuth(ScopeRead))
+	g.DELETE("/connections/:clientID", s.deleteConnection, s.requireAuth(ScopeWrite))
+
+	g.GET("/sessions/:clientID", s.getSession, s.requireAuth(ScopeRead))
+	g.DELETE("/sessions/:clientID", s.deleteSession, s.requireAuth(ScopeWrite))
+
+	g.GET("/subscriptions", s.listSubscriptions, s.requireAuth(ScopeRead))
+
+	g.GET("/retained", s.listRetained, s.requireAuth(ScopeRead))
+	g.DELETE("/retained", s.deleteRetained, s.requireAuth(ScopeWrite))
+
+	g.POST("/publish", s.publish, s.requireAuth(ScopeWrite))
+
+	g.GET("/users", s.listUsers, s.requireAuth(ScopeRead))
+	g.POST("/users", s.createUser, s.requireAuth(ScopeWrite))
+	g.GET("/users/:username", s.getUser, s.requireAuth(ScopeRead))
+	g.PUT("/users/:username", s.updateUser, s.requireAuth(ScopeWrite))
+	g.DELETE("/users/:username", s.deleteUser, s.requireAuth(ScopeWrite))
+
+	g.GET("/acls", s.listACLs, s.requireAuth(ScopeRead))
+	g.POST("/acls", s.createACL, s.requireAuth(ScopeWrite))
+	g.PUT("/acls/:id", s.updateACL, s.requireAuth(ScopeWrite))
+	g.DELETE("/acls/:id", s.deleteACL, s.requireAuth(ScopeWrite))
+
+	g.GET("/auth/chains", s.getChains, s.requireAuth(ScopeRead))
+	g.PUT("/auth/chains", s.putChains, s.requireAuth(ScopeWrite))
+	g.POST("/auth/refresh", s.refreshAuth, s.requireAuth(ScopeWrite))
+
 	g.GET("/apikeys", s.listAPIKeys, s.requireAuth(ScopeAdmin))
 	g.POST("/apikeys", s.createAPIKey, s.requireAuth(ScopeAdmin))
 	g.DELETE("/apikeys/:id", s.deleteAPIKey, s.requireAuth(ScopeAdmin))
