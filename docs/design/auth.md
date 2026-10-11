@@ -123,7 +123,7 @@ type ruleSet struct {              // 每个授权源一份
 ## 6. 故障行为
 
 - db 源不可达：内存中最后一份 ruleSet 继续服务存量判定；新连接认证失败即拒（fail-closed),v5 reason 0x86/0x87；无旧缓存时默认拒绝。
-- 认证失败、授权拒绝均计数：`mayfly_auth_results_total{source,result}`。
+- 认证失败、授权拒绝均计数:broker 级聚合 `mayfly_auth_results_total{result}` / `mayfly_acl_results_total{result}`;存在认证管理器时另输出按源细分 `mayfly_auth_source_results_total{source,chain,result}`。
 
 ## 7. 密码
 

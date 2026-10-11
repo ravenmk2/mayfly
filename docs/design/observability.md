@@ -16,7 +16,7 @@
 
 `/metrics`(管理端口),`prometheus/client_golang` 输出:
 
-- `mayfly_connections`、`mayfly_messages_received_total{qos}`、`mayfly_messages_sent_total{qos}`、`mayfly_messages_dropped_total`、`mayfly_bytes_total{direction}`、`mayfly_subscriptions`、`mayfly_retained`、`mayfly_inflight`、`mayfly_auth_results_total{result}`、`mayfly_store_write_errors_total`、`mayfly_build_info{version}`
+- `mayfly_connections`、`mayfly_connections_total`、`mayfly_messages_received_total{qos}`、`mayfly_messages_sent_total{qos}`、`mayfly_messages_dropped_total`、`mayfly_messages_oversized_total`、`mayfly_bytes_total{direction}`、`mayfly_subscriptions`、`mayfly_retained`、`mayfly_inflight`、`mayfly_auth_results_total{result}`、`mayfly_auth_source_results_total{source,chain,result}`(有认证管理器时)、`mayfly_acl_results_total{result}`、`mayfly_store_write_errors_total`、`mayfly_goroutines`、`mayfly_heap_alloc_bytes`、`mayfly_uptime_seconds`、`mayfly_build_info{version}`
 
 ## 4. 日志
 

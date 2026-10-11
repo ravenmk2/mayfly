@@ -80,11 +80,12 @@ func newLogger(lc config.LogConfig) *slog.Logger {
 // buildAuth assembles the authentication/authorization chains. With no
 // source configured at all the broker stays on the allow-all stub and logs
 // a warning; a chain without sources falls back to allow-all as well so a
-// users-only demo stays usable.
-func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) (hook.Authenticator, hook.Gate, func(context.Context), func() error) {
+// users-only demo stays usable. The returned authStats feeds the per-source
+// Prometheus breakdown (nil when no auth manager exists).
+func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) (hook.Authenticator, hook.Gate, func() []auth.SourceStat, func(context.Context), func() error) {
 	if !cfg.HasSources() {
 		logger.Warn("no authentication configured, allowing all clients")
-		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), func(context.Context) {}, func() error { return nil }
+		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), nil, func(context.Context) {}, func() error { return nil }
 	}
 
 	authCfg := cfg.ToAuthConfig()
@@ -103,7 +104,7 @@ func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) 
 		logger.Warn("no authorization source configured, allowing all operations")
 		authz = hook.NewAuthzChain(hook.AllowAll{})
 	}
-	return authn, authz, m.Start, m.Close
+	return authn, authz, m.Stats, m.Start, m.Close
 }
 
 // buildStore assembles the persistence layer: the SQL store from the DSN
@@ -194,7 +195,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	authn, authz, startAuth, closeAuth := buildAuth(ctx, logger, cfg.Auth)
+	authn, authz, authStats, startAuth, closeAuth := buildAuth(ctx, logger, cfg.Auth)
 	startAuth(ctx)
 	defer func() { _ = closeAuth() }()
 
@@ -235,7 +236,13 @@ func main() {
 	errCh := make(chan error, 2)
 	go func() { errCh <- b.Run(ctx) }()
 
-	httpServer := &http.Server{Addr: cfg.Admin.Addr, Handler: server.New(), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{
+		Addr: cfg.Admin.Addr,
+		Handler: server.New(server.Options{
+			MetricsHandler: metrics.NewHandler(m, metrics.PromOptions{AuthStats: authStats}),
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		logger.Info("console listening", "addr", httpServer.Addr, "version", version)
 		if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
