@@ -18,26 +18,29 @@ import (
 	"github.com/ravenmk2/mayfly/internal/hook"
 	"github.com/ravenmk2/mayfly/internal/listener"
 	"github.com/ravenmk2/mayfly/internal/server"
+	"github.com/ravenmk2/mayfly/internal/store"
 )
 
 var version = "dev" // default when not injected; release builds inject via -ldflags "-X main.version="
 
-// authFlags carries the minimal auth configuration for this milestone; the
-// configuration milestone replaces it with full file loading. Flags win
-// over the MAYFLY_AUTH_* environment variables.
-type authFlags struct {
+// cliFlags carries the minimal auth and store configuration for this
+// milestone; the configuration milestone replaces it with full file loading.
+// Flags win over the MAYFLY_* environment variables.
+type cliFlags struct {
 	fileUsers      string
 	fileACL        string
 	dbDSN          string
 	anonymousAllow bool
+	storeDSN       string
 }
 
-func parseAuthFlags() authFlags {
-	var f authFlags
+func parseFlags() cliFlags {
+	var f cliFlags
 	flag.StringVar(&f.fileUsers, "auth-file-users", "", "users file for the file auth source (.json/.yaml/.toml)")
 	flag.StringVar(&f.fileACL, "auth-file-acl", "", "acl file for the file authz source (.json/.yaml/.toml)")
 	flag.StringVar(&f.dbDSN, "auth-db-dsn", "", "db auth source dsn: sqlite:<path> | mysql:<driver-dsn>")
 	flag.BoolVar(&f.anonymousAllow, "auth-anonymous-allow", false, "admit passwordless CONNECTs that no source matched")
+	flag.StringVar(&f.storeDSN, "store-dsn", "", "persistence store dsn: sqlite:<path> | mysql:<driver-dsn>; empty runs memory-only")
 	flag.Parse()
 
 	if f.fileUsers == "" {
@@ -52,6 +55,9 @@ func parseAuthFlags() authFlags {
 	if !f.anonymousAllow {
 		f.anonymousAllow = os.Getenv("MAYFLY_AUTH_ANONYMOUS_ALLOW") == "true"
 	}
+	if f.storeDSN == "" {
+		f.storeDSN = os.Getenv("MAYFLY_STORE_DSN")
+	}
 	return f
 }
 
@@ -59,7 +65,7 @@ func parseAuthFlags() authFlags {
 // broker stays on the allow-all stub and logs a warning; with a partially
 // configured pair the missing side falls back to allow-all as well so a
 // users-only demo stays usable.
-func buildAuth(ctx context.Context, logger *slog.Logger, f authFlags) (hook.Authenticator, hook.Gate, func(context.Context), func() error) {
+func buildAuth(ctx context.Context, logger *slog.Logger, f cliFlags) (hook.Authenticator, hook.Gate, func(context.Context), func() error) {
 	if f.fileUsers == "" && f.fileACL == "" && f.dbDSN == "" {
 		logger.Warn("no authentication configured, allowing all clients")
 		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), func(context.Context) {}, func() error { return nil }
@@ -95,9 +101,28 @@ func buildAuth(ctx context.Context, logger *slog.Logger, f authFlags) (hook.Auth
 	return authn, authz, m.Start, m.Close
 }
 
+// buildStore assembles the persistence layer: the SQL store from the DSN
+// fronted by the asynchronous BatchWriter. An empty DSN keeps the broker
+// memory-only (docs/design/persistence.md).
+func buildStore(ctx context.Context, logger *slog.Logger, dsn string) store.Store {
+	if dsn == "" {
+		return nil
+	}
+	inner, err := store.Open(ctx, dsn)
+	if err != nil {
+		log.Fatalf("store setup: %v", err)
+	}
+	bw, err := store.NewBatchWriter(inner, store.BatchOptions{Logger: logger})
+	if err != nil {
+		log.Fatalf("store setup: %v", err)
+	}
+	logger.Info("persistence store configured", "backend", inner.Backend())
+	return bw
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	flags := parseAuthFlags()
+	flags := parseFlags()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -106,12 +131,14 @@ func main() {
 	startAuth(ctx)
 	defer func() { _ = closeAuth() }()
 
+	st := buildStore(ctx, logger, flags.storeDSN)
+
 	// Hardcoded defaults until the configuration milestone lands.
 	tcp, err := listener.NewTCP(listener.TCPConfig{Address: ":1883"})
 	if err != nil {
 		log.Fatal(err)
 	}
-	b := broker.New(broker.Options{Logger: logger, Authenticator: authn, Authorizer: authz})
+	b := broker.New(broker.Options{Logger: logger, Authenticator: authn, Authorizer: authz, Store: st})
 	b.AddListener(tcp)
 
 	errCh := make(chan error, 2)
@@ -134,4 +161,9 @@ func main() {
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	_ = b.Close()
+	if st != nil {
+		// After the broker stops producing writes: drain the batch writer
+		// and close the database.
+		_ = st.Close()
+	}
 }
