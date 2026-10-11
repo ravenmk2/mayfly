@@ -16,7 +16,14 @@ type Store interface {
 }
 ```
 
-实现:`mysql`(默认)、`sqlite`(内置)、`memory`(测试/纯内存运行)。同一 SQL 实现双 driver(与 auth 共用连接池)。
+实现:`mysql`、`sqlite`(共用 `SQLStore`,`--store-dsn` / `MAYFLY_STORE_DSN` 按 scheme 选择;不传则纯内存运行)、`memory`(测试/纯内存运行)。DSN 解析风格与 auth 一致;迁移记录存放在 store 私有的 `mf_schema_migrations` 表,避免与 auth 的 `schema_migrations` 版本序列互相干扰。
+
+实现细节(与上文接口的偏差):
+
+- `mf_inflight.packet` BLOB 编码为 `[协议版本][wire packet][flags]`:版本字节保证 v5 属性往返不丢;flags 记录出向 `sent` 与 PUBREL 阶段。`mf_retained.packet` 为 `[协议版本][wire packet]`,retained 包无 Packet Identifier,QoS 1/2 落盘时编码占位符 1,恢复时忽略。
+- MySQL 的 packet 列用 `MEDIUMBLOB`(BLOB 上限 64 KiB,小于默认 1 MiB 最大包)。
+- 写失败计数器为 `BatchWriter.WriteErrors`(原子计数,指标里程碑再导出为 `store.write_errors`)。
+- retained 的 v5 Will 消息属性跨重启不保留(Will packet 无协议版本上下文),为已知可接受缺口。
 
 ## 3. 异步批量写
 

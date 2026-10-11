@@ -159,7 +159,7 @@ func TestBatchWriterCloseDrains(t *testing.T) {
 
 	inner.mu.Lock()
 	defer inner.mu.Unlock()
-	assert.Len(t, inner.MemoryStore.sessions, n)
+	assert.Len(t, inner.sessions, n)
 }
 
 func TestBatchWriterEnqueueAfterClose(t *testing.T) {

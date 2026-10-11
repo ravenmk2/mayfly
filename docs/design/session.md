@@ -19,7 +19,9 @@ type Client struct {
 1. CONNECT → 认证 → **会话接管**:同 ID 老连接发 `ErrSessionTakenOver` 断开,老会话非 clean 则迁移订阅与 inflight 到新 Client(`takenOver` 标记防止老连接 defer 清理误删新会话)。
 2. v3:`Clean` 决定断开是否清会话;v5:`Clean Start` + `Session Expiry Interval`(0=断开即清,0xFFFFFFFF=永不过期)。CONNACK 带 `Session Present`。
 3. 持久会话断开保留,由最小堆按 `StopTime+expiry` 到期清理。
-4. 重连且 session present:重发未完成 inflight(DUP=1)。
+4. 重连且 session present:重发未完成 inflight(DUP=1),随后 `PromoteQueued` 把排队消息(含离线期间入队的)补进空闲窗口。
+5. **离线队列**:投递时目标客户端离线但会话持久 → QoS 1/2 消息经 `QueueOffline` 写入其出向 inflight(内存先行,Store 镜像落盘),重连时随 PromoteQueued 投递;QoS 0 与共享组离线成员仍丢弃。
+6. 启动恢复:broker 从 Store 重建离线会话(`NewRestoredClient` + `RestoreOutbound`/`RestoreInbound`),恢复完成后监听器才接受连接;出向恢复包剥除 connection 级 Topic Alias。
 
 ## 3. Inflight 与流控
 
