@@ -99,15 +99,23 @@ func (c *Client) ReceivePubrel(packetID uint16) (deliver *packet.Packet, ack pac
 // full and the message was queued. QoS 0 messages bypass inflight entirely.
 // The returned packet is a copy; the inflight entry holds its own.
 func (c *Client) SendPublish(now time.Time, pk *packet.Packet) (*packet.Packet, error) {
+	send, _, err := c.EnqueuePublish(now, pk)
+	return send, err
+}
+
+// EnqueuePublish is SendPublish plus a copy of the stored inflight entry —
+// including when the message was queued behind the window — so callers can
+// persist it (docs/design/persistence.md). stored is nil for QoS 0.
+func (c *Client) EnqueuePublish(now time.Time, pk *packet.Packet) (send *packet.Packet, stored *InflightMessage, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if pk.FixedHeader.Qos == 0 {
 		out := *pk
-		return &out, nil
+		return &out, nil, nil
 	}
 	id, ok := c.ids.allocate()
 	if !ok {
-		return nil, packet.Code{Code: packet.CodePacketIdentifierInUse,
+		return nil, nil, packet.Code{Code: packet.CodePacketIdentifierInUse,
 			Reason: "all 65535 packet identifiers are in use"}
 	}
 	msg := &InflightMessage{
@@ -118,11 +126,12 @@ func (c *Client) SendPublish(now time.Time, pk *packet.Packet) (*packet.Packet, 
 	msg.Packet.PacketID = id
 	msg.Packet.FixedHeader.Dup = false
 	msg.Packet.Expiry = msg.Expiry
+	cp := *msg
 	if c.outbound.store(msg) {
 		out := msg.Packet
-		return &out, nil
+		return &out, &cp, nil
 	}
-	return nil, nil
+	return nil, &cp, nil
 }
 
 // promote moves the head of the queue into a freed window slot, returning
