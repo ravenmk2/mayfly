@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/ravenmk2/mayfly/internal/auth"
 	"github.com/ravenmk2/mayfly/internal/broker"
+	"github.com/ravenmk2/mayfly/internal/config"
 	"github.com/ravenmk2/mayfly/internal/hook"
 	"github.com/ravenmk2/mayfly/internal/listener"
 	"github.com/ravenmk2/mayfly/internal/server"
@@ -23,78 +26,79 @@ import (
 
 var version = "dev" // default when not injected; release builds inject via -ldflags "-X main.version="
 
-// cliFlags carries the minimal auth and store configuration for this
-// milestone; the configuration milestone replaces it with full file loading.
-// Flags win over the MAYFLY_* environment variables.
+// cliFlags are the few knobs kept outside the configuration file; they have
+// the highest precedence over MAYFLY_* variables and mayfly.yaml.
 type cliFlags struct {
-	fileUsers      string
-	fileACL        string
-	dbDSN          string
-	anonymousAllow bool
-	storeDSN       string
+	config      string
+	dataDir     string
+	showVersion bool
 }
 
 func parseFlags() cliFlags {
 	var f cliFlags
-	flag.StringVar(&f.fileUsers, "auth-file-users", "", "users file for the file auth source (.json/.yaml/.toml)")
-	flag.StringVar(&f.fileACL, "auth-file-acl", "", "acl file for the file authz source (.json/.yaml/.toml)")
-	flag.StringVar(&f.dbDSN, "auth-db-dsn", "", "db auth source dsn: sqlite:<path> | mysql:<driver-dsn>")
-	flag.BoolVar(&f.anonymousAllow, "auth-anonymous-allow", false, "admit passwordless CONNECTs that no source matched")
-	flag.StringVar(&f.storeDSN, "store-dsn", "", "persistence store dsn: sqlite:<path> | mysql:<driver-dsn>; empty runs memory-only")
+	flag.StringVar(&f.config, "config", "", "path to mayfly.yaml (default "+config.DefaultPath+")")
+	flag.StringVar(&f.dataDir, "data-dir", "", "data directory (overrides data_dir)")
+	flag.BoolVar(&f.showVersion, "version", false, "print the version and exit")
 	flag.Parse()
-
-	if f.fileUsers == "" {
-		f.fileUsers = os.Getenv("MAYFLY_AUTH_FILE_USERS")
-	}
-	if f.fileACL == "" {
-		f.fileACL = os.Getenv("MAYFLY_AUTH_FILE_ACL")
-	}
-	if f.dbDSN == "" {
-		f.dbDSN = os.Getenv("MAYFLY_AUTH_DB_DSN")
-	}
-	if !f.anonymousAllow {
-		f.anonymousAllow = os.Getenv("MAYFLY_AUTH_ANONYMOUS_ALLOW") == "true"
-	}
-	if f.storeDSN == "" {
-		f.storeDSN = os.Getenv("MAYFLY_STORE_DSN")
-	}
 	return f
 }
 
-// buildAuth assembles the chains. With no source configured at all the
-// broker stays on the allow-all stub and logs a warning; with a partially
-// configured pair the missing side falls back to allow-all as well so a
+// newLogger builds the process logger from the configuration
+// (docs/design/observability.md): text for development, JSON for
+// production; output is stderr, stdout or a file path.
+func newLogger(lc config.LogConfig) *slog.Logger {
+	var level slog.Level
+	switch lc.Level {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	var w io.Writer = os.Stderr
+	switch lc.Output {
+	case "", "stderr":
+	case "stdout":
+		w = os.Stdout
+	default:
+		f, err := os.OpenFile(lc.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mayfly: cannot open log output %s: %v; logging to stderr\n", lc.Output, err)
+		} else {
+			w = f
+		}
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	if lc.Format == "json" {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
+}
+
+// buildAuth assembles the authentication/authorization chains. With no
+// source configured at all the broker stays on the allow-all stub and logs
+// a warning; a chain without sources falls back to allow-all as well so a
 // users-only demo stays usable.
-func buildAuth(ctx context.Context, logger *slog.Logger, f cliFlags) (hook.Authenticator, hook.Gate, func(context.Context), func() error) {
-	if f.fileUsers == "" && f.fileACL == "" && f.dbDSN == "" {
+func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) (hook.Authenticator, hook.Gate, func(context.Context), func() error) {
+	if !cfg.HasSources() {
 		logger.Warn("no authentication configured, allowing all clients")
 		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), func(context.Context) {}, func() error { return nil }
 	}
 
-	cfg := auth.Config{AnonymousAllow: f.anonymousAllow}
-	if f.dbDSN != "" {
-		cfg.Authentication = append(cfg.Authentication, auth.SourceConfig{Type: "db", Enabled: true, DSN: f.dbDSN})
-		cfg.Authorization = append(cfg.Authorization, auth.SourceConfig{Type: "db", Enabled: true, DSN: f.dbDSN})
-	}
-	if f.fileUsers != "" {
-		cfg.Authentication = append(cfg.Authentication, auth.SourceConfig{Type: "file", Enabled: true, Path: f.fileUsers})
-	}
-	if f.fileACL != "" {
-		cfg.Authorization = append(cfg.Authorization, auth.SourceConfig{Type: "file", Enabled: true, Path: f.fileACL})
-	}
-
-	m, err := auth.NewManager(ctx, cfg, logger)
+	authCfg := cfg.ToAuthConfig()
+	m, err := auth.NewManager(ctx, authCfg, logger)
 	if err != nil {
 		log.Fatalf("auth setup: %v", err)
 	}
 
 	var authn hook.Authenticator = m
-	if len(cfg.Authentication) == 0 {
+	if len(authCfg.Authentication) == 0 {
 		logger.Warn("no authentication source configured, allowing all clients")
 		authn = hook.NewAuthChain(hook.AllowAll{})
 	}
 	var authz hook.Gate = m
-	if len(cfg.Authorization) == 0 {
+	if len(authCfg.Authorization) == 0 {
 		logger.Warn("no authorization source configured, allowing all operations")
 		authz = hook.NewAuthzChain(hook.AllowAll{})
 	}
@@ -120,31 +124,104 @@ func buildStore(ctx context.Context, logger *slog.Logger, dsn string) store.Stor
 	return bw
 }
 
+// buildListeners instantiates the configured listeners.
+func buildListeners(cfg []config.ListenerConfig) ([]listener.Listener, error) {
+	out := make([]listener.Listener, 0, len(cfg))
+	for _, lc := range cfg {
+		l, err := buildListener(lc)
+		if err != nil {
+			return nil, fmt.Errorf("listener %s: %w", lc.ID, err)
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// buildListener instantiates one listener from its configuration.
+func buildListener(lc config.ListenerConfig) (listener.Listener, error) {
+	tlsCfg := listener.TLSConfig{
+		CertFile:        lc.TLS.CertFile,
+		KeyFile:         lc.TLS.KeyFile,
+		CAFile:          lc.TLS.CAFile,
+		ClientAuth:      lc.TLS.ClientAuth,
+		UseCNAsUsername: lc.TLS.UseCNAsUsername,
+	}
+	switch lc.Type {
+	case config.TypeTCP:
+		return listener.NewTCP(listener.TCPConfig{
+			ID: lc.ID, Address: lc.Address, MaxConnections: lc.MaxConnections,
+		})
+	case config.TypeTLS:
+		tlsCfg.ID = lc.ID
+		tlsCfg.Address = lc.Address
+		tlsCfg.MaxConnections = lc.MaxConnections
+		return listener.NewTLS(tlsCfg)
+	case config.TypeWS, config.TypeWSS:
+		wsCfg := listener.WSConfig{
+			ID: lc.ID, Address: lc.Address, MaxConnections: lc.MaxConnections,
+			Path: lc.Path, AllowedOrigins: lc.AllowedOrigins,
+		}
+		if lc.Type == config.TypeWSS {
+			wsCfg.TLS = &tlsCfg
+		}
+		return listener.NewWS(wsCfg)
+	default:
+		return nil, fmt.Errorf("unknown type %q", lc.Type)
+	}
+}
+
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	flags := parseFlags()
+	if flags.showVersion {
+		fmt.Println("mayfly", version)
+		return
+	}
+
+	cfg, fromFile, err := config.Load(flags.config)
+	if err != nil {
+		log.Fatalf("configuration: %v", err)
+	}
+	if flags.dataDir != "" {
+		cfg.DataDir = flags.dataDir
+	}
+	logger := newLogger(cfg.Log)
+	if !fromFile {
+		logger.Warn("no configuration file found; running with built-in defaults",
+			"path", config.DefaultPath)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	authn, authz, startAuth, closeAuth := buildAuth(ctx, logger, flags)
+	authn, authz, startAuth, closeAuth := buildAuth(ctx, logger, cfg.Auth)
 	startAuth(ctx)
 	defer func() { _ = closeAuth() }()
 
-	st := buildStore(ctx, logger, flags.storeDSN)
+	st := buildStore(ctx, logger, cfg.Store.DSN)
 
-	// Hardcoded defaults until the configuration milestone lands.
-	tcp, err := listener.NewTCP(listener.TCPConfig{Address: ":1883"})
+	listeners, err := buildListeners(cfg.Listeners)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("listener setup: %v", err)
 	}
-	b := broker.New(broker.Options{Logger: logger, Authenticator: authn, Authorizer: authz, Store: st})
-	b.AddListener(tcp)
+	b := broker.New(broker.Options{
+		MaxConnections:     cfg.Broker.MaxConnections,
+		MaxPacketSize:      cfg.Broker.MaxPacketSize,
+		OutboundQueueDepth: cfg.Broker.OutboundQueueDepth,
+		ReceiveMaximum:     cfg.Broker.ReceiveMaximum,
+		TopicAliasMaximum:  cfg.Broker.TopicAliasMaximum,
+		Logger:             logger,
+		Authenticator:      authn,
+		Authorizer:         authz,
+		Store:              st,
+	})
+	for _, l := range listeners {
+		b.AddListener(l)
+	}
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- b.Run(ctx) }()
 
-	httpServer := &http.Server{Addr: ":8080", Handler: server.New(), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Addr: cfg.Admin.Addr, Handler: server.New(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		logger.Info("console listening", "addr", httpServer.Addr, "version", version)
 		if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
