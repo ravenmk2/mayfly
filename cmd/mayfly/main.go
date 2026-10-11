@@ -23,6 +23,7 @@ import (
 	"github.com/ravenmk2/mayfly/internal/metrics"
 	"github.com/ravenmk2/mayfly/internal/server"
 	"github.com/ravenmk2/mayfly/internal/store"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var version = "dev" // default when not injected; release builds inject via -ldflags "-X main.version="
@@ -44,10 +45,30 @@ func parseFlags() cliFlags {
 	return f
 }
 
+// logOutput resolves the configured log destination; file paths get
+// lumberjack rotation (docs/design/observability.md section 4).
+func logOutput(output string) io.Writer {
+	switch output {
+	case "", "stderr":
+		return os.Stderr
+	case "stdout":
+		return os.Stdout
+	default:
+		return &lumberjack.Logger{
+			Filename:   output,
+			MaxSize:    100, // MiB per file before rotation
+			MaxBackups: 7,
+			MaxAge:     30, // days
+			Compress:   true,
+		}
+	}
+}
+
 // newLogger builds the process logger from the configuration
 // (docs/design/observability.md): text for development, JSON for
-// production; output is stderr, stdout or a file path.
-func newLogger(lc config.LogConfig) *slog.Logger {
+// production; output is stderr, stdout or a rotating file. The returned
+// closer releases the file handle (nil for the standard streams).
+func newLogger(lc config.LogConfig) (*slog.Logger, io.Closer) {
 	var level slog.Level
 	switch lc.Level {
 	case "debug":
@@ -57,24 +78,13 @@ func newLogger(lc config.LogConfig) *slog.Logger {
 	case "error":
 		level = slog.LevelError
 	}
-	var w io.Writer = os.Stderr
-	switch lc.Output {
-	case "", "stderr":
-	case "stdout":
-		w = os.Stdout
-	default:
-		f, err := os.OpenFile(lc.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "mayfly: cannot open log output %s: %v; logging to stderr\n", lc.Output, err)
-		} else {
-			w = f
-		}
-	}
+	w := logOutput(lc.Output)
+	closer, _ := w.(io.Closer)
 	opts := &slog.HandlerOptions{Level: level}
 	if lc.Format == "json" {
-		return slog.New(slog.NewJSONHandler(w, opts))
+		return slog.New(slog.NewJSONHandler(w, opts)), closer
 	}
-	return slog.New(slog.NewTextHandler(w, opts))
+	return slog.New(slog.NewTextHandler(w, opts)), closer
 }
 
 // buildAuth assembles the authentication/authorization chains. With no
@@ -186,7 +196,12 @@ func main() {
 	if flags.dataDir != "" {
 		cfg.DataDir = flags.dataDir
 	}
-	logger := newLogger(cfg.Log)
+	logger, closeLog := newLogger(cfg.Log)
+	defer func() {
+		if closeLog != nil {
+			_ = closeLog.Close()
+		}
+	}()
 	if !fromFile {
 		logger.Warn("no configuration file found; running with built-in defaults",
 			"path", config.DefaultPath)

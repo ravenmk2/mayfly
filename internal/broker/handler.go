@@ -146,7 +146,8 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		if err != nil {
 			reason = "authentication failed"
 		}
-		s.log.Debug("authentication rejected", "client", client.ID, "reason", reason)
+		s.log.Warn("authentication rejected", "client_id", client.ID, "username", client.Username,
+			"remote_addr", c.remoteAddr(), "reason", reason)
 		c.rejectConnect(client.ProtocolVersion, code)
 		return errNormalClose
 	}
@@ -183,6 +184,8 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 				})
 			}
 			old.stop()
+			s.log.Info("session taken over", "client_id", client.ID, "username", client.Username,
+				"remote_addr", c.remoteAddr(), "clean_start", client.CleanStart)
 			if client.CleanStart {
 				// The old session ends here; its delayed Will fires now
 				// [MQTT-3.1.3-9].
@@ -263,8 +266,9 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		c.enqueue(&promoted)
 		s.storePutPromoted(client, promoted.PacketID)
 	}
-	s.log.Debug("client connected", "client", client.ID, "version", client.ProtocolVersion,
-		"sessionPresent", connack.SessionPresent)
+	s.log.Info("client connected", "client_id", client.ID, "username", client.Username,
+		"remote_addr", c.remoteAddr(), "listener", c.listenerID(),
+		"version", client.ProtocolVersion, "session_present", connack.SessionPresent)
 	return nil
 }
 
@@ -473,7 +477,8 @@ func (c *conn) cleanup() {
 		if publishWill {
 			s.arrangeWill(client)
 		}
-		s.log.Debug("client disconnected", "client", client.ID)
+		s.log.Info("client disconnected", "client_id", client.ID, "username", c.clientInfo().Username,
+			"remote_addr", c.remoteAddr(), "session_ended", sessionEnded, "will_published", publishWill)
 	})
 }
 
