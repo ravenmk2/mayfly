@@ -173,10 +173,10 @@ func TestEnvInvalidValueFails(t *testing.T) {
 }
 
 func TestLoadUnknownYAMLFieldFails(t *testing.T) {
-	path := writeFile(t, "mayfly.yaml", "log:\n  levle: debug\n")
+	path := writeFile(t, "mayfly.yaml", "log:\n  depth: debug\n")
 	_, _, err := Load(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "levle")
+	assert.Contains(t, err.Error(), "depth")
 }
 
 func TestValidateErrors(t *testing.T) {
