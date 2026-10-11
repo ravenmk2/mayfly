@@ -242,6 +242,16 @@ func (pk *Packet) Decode(b []byte) error {
 	}
 	pk.ProtocolVersion = pk.version()
 	switch pk.FixedHeader.Type {
+	case Connect:
+		return pk.connectDecode(body)
+	case Connack:
+		return pk.connackDecode(body)
+	case Pingreq:
+		return pk.pingreqDecode(body)
+	case Pingresp:
+		return pk.pingrespDecode(body)
+	case Disconnect:
+		return pk.disconnectDecode(body)
 	default:
 		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
 	}
@@ -272,6 +282,14 @@ func (pk *Packet) Encode() ([]byte, error) {
 // encodeBody encodes the variable header and payload into dst.
 func (pk *Packet) encodeBody(dst *[]byte) error {
 	switch pk.FixedHeader.Type {
+	case Connect:
+		return pk.connectEncode(dst)
+	case Connack:
+		return pk.connackEncode(dst)
+	case Pingreq, Pingresp:
+		return nil
+	case Disconnect:
+		return pk.disconnectEncode(dst)
 	default:
 		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
 	}
@@ -280,7 +298,13 @@ func (pk *Packet) encodeBody(dst *[]byte) error {
 // Validate checks the semantic constraints of the packet for its type.
 func (pk *Packet) Validate() error {
 	switch pk.FixedHeader.Type {
+	case Connect:
+		return pk.connectValidate()
+	case Connack:
+		return pk.connackValidate()
+	case Disconnect:
+		return pk.disconnectValidate()
 	default:
-		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
+		return nil
 	}
 }
