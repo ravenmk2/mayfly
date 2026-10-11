@@ -126,7 +126,11 @@ type Stats struct {
 	// MessagesDropped counts QoS 0 messages dropped because the outbound
 	// queue was full (architecture section 3).
 	MessagesDropped atomic.Int64
-	AuthFailures    atomic.Int64
+	// MessagesOversized counts messages dropped because they exceeded the
+	// Maximum Packet Size the receiving client declared in CONNECT — a
+	// "the peer cannot hold this" drop, distinct from backpressure.
+	MessagesOversized atomic.Int64
+	AuthFailures      atomic.Int64
 }
 
 // sessionExpiryItem is one node of the disconnected-session expiry min-heap

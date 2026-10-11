@@ -86,6 +86,21 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 	c.version = client.ProtocolVersion
 	c.mu.Unlock()
 
+	if client.ProtocolVersion == packet.Version5 {
+		// Enhanced authentication is not supported: a CONNECT carrying an
+		// Authentication Method is rejected with 0x8C [MQTT-3.1.2-22].
+		if pk.Properties.AuthMethodFlag {
+			s.Stats.AuthFailures.Add(1)
+			c.rejectConnect(client.ProtocolVersion, packet.CodeBadAuthenticationMethod)
+			return errNormalClose
+		}
+		// Request Problem Information 0 opts out of Reason String
+		// properties [MQTT-3.1.2-29].
+		if pk.Properties.RequestProblemInfoFlag && pk.Properties.RequestProblemInfo == 0 {
+			c.omitReasonString.Store(true)
+		}
+	}
+
 	// Authentication happens before any session state is touched.
 	res, err := s.authn.Authenticate(context.Background(), hook.ConnectInfo{
 		ClientID:        client.ID,
@@ -186,6 +201,12 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		connack.Properties.ReceiveMaximumFlag = true
 		connack.Properties.TopicAliasMaximum = s.opts.TopicAliasMaximum
 		connack.Properties.TopicAliasMaximumFlag = true
+		if s.opts.MaxPacketSize > 0 {
+			// Advertise the broker's inbound packet limit so the client
+			// must not send larger packets [MQTT-3.1.2-24].
+			connack.Properties.MaximumPacketSize = uint32(s.opts.MaxPacketSize) //nolint:gosec // bounded by packet.MaxRemainingLength
+			connack.Properties.MaximumPacketSizeFlag = true
+		}
 		if assignedID != "" {
 			connack.Properties.AssignedClientID = assignedID
 			connack.Properties.AssignedClientIDFlag = true
@@ -345,12 +366,11 @@ func (c *conn) onDisconnect(pk *packet.Packet) error {
 		expiry, err := session.SessionExpiryAfterDisconnect(client.Expiry(), pk)
 		if err != nil {
 			// Extending a session that expires at disconnect is a Protocol
-			// Error [MQTT-3.1.2-11]; the connection still closes normally.
-			c.server.log.Debug("DISCONNECT session expiry rejected",
-				"client", client.ID, "error", err)
-		} else {
-			client.SetSessionExpiry(expiry)
+			// Error [MQTT-3.1.2-11]: notify the client before closing.
+			c.fail(err)
+			return errNormalClose
 		}
+		client.SetSessionExpiry(expiry)
 	}
 	return errNormalClose
 }

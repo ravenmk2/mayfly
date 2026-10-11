@@ -39,6 +39,10 @@ type conn struct {
 	// suppressWill marks connections whose Will is handled elsewhere
 	// (session expiry sweep), so cleanup does not publish it twice.
 	suppressWill atomic.Bool
+	// omitReasonString records a v5 client's Request Problem Information
+	// of 0: the broker then omits Reason String properties on packets it
+	// sends [MQTT-3.1.2-29].
+	omitReasonString atomic.Bool
 
 	mu                 sync.Mutex
 	client             *session.Client // nil until CONNECT succeeds
@@ -251,8 +255,10 @@ func (c *conn) fail(err error) {
 			ProtocolVersion: packet.Version5,
 			ReasonCode:      code.Code,
 		}
-		ack.Properties.ReasonString = code.Reason
-		ack.Properties.ReasonStringFlag = code.Reason != ""
+		if !c.omitReasonString.Load() {
+			ack.Properties.ReasonString = code.Reason
+			ack.Properties.ReasonStringFlag = code.Reason != ""
+		}
 		c.enqueue(ack)
 	}
 	s.log.Debug("connection failed", "conn", c.id, "error", err)

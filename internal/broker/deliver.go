@@ -154,6 +154,16 @@ func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Pac
 		s.Stats.MessagesDropped.Add(1)
 		return // expired or otherwise undeliverable
 	}
+	if !fitsPeerMaximum(client, out) {
+		// The message exceeds the Maximum Packet Size the client declared
+		// in CONNECT: drop it without registering it in inflight, so an
+		// undeliverable QoS 1/2 message cannot be retransmitted forever
+		// [MQTT-3.1.2-24]. This is a peer-capacity drop, not backpressure.
+		s.Stats.MessagesOversized.Add(1)
+		s.log.Debug("dropping message exceeding the client maximum packet size",
+			"client", client.ID, "topic", out.TopicName)
+		return
+	}
 	send, err := client.SendPublish(now, out)
 	if err != nil {
 		// Packet identifiers exhausted: an effectively unreachable state.
@@ -164,6 +174,26 @@ func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Pac
 	if send != nil {
 		target.enqueue(send)
 	}
+}
+
+// fitsPeerMaximum reports whether the encoded form of pk fits within the
+// Maximum Packet Size the client declared in CONNECT. MQTT 3.1.1 clients and
+// v5 clients without the property accept any size. QoS 1/2 packets are
+// measured with a Packet Identifier present, since SendPublish assigns one
+// afterwards.
+func fitsPeerMaximum(client *session.Client, pk *packet.Packet) bool {
+	if client.ProtocolVersion != packet.Version5 || !client.Properties.MaximumPacketSizeFlag {
+		return true
+	}
+	probe := *pk
+	if probe.FixedHeader.Qos > 0 && probe.PacketID == 0 {
+		probe.PacketID = 1
+	}
+	encoded, err := probe.Encode()
+	if err != nil {
+		return true // encode failures are counted and dropped by the write loop
+	}
+	return len(encoded) <= int(client.Properties.MaximumPacketSize)
 }
 
 // buildDelivery creates the outbound PUBLISH for one subscriber: QoS
