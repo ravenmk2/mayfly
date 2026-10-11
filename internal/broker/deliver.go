@@ -117,8 +117,10 @@ func (c *conn) ackDeniedPublish(pk *packet.Packet) {
 
 // deliver fans a publication out to the matching subscribers and reports
 // whether any subscription matched. NoLocal filters out the publisher's own
-// subscriptions [MQTT-3.8.3-3]; offline members of shared groups are skipped
-// (the message has no offline queue until the Store milestone).
+// subscriptions [MQTT-3.8.3-3]. Messages for a disconnected persistent
+// session join its offline queue (the outbound inflight window) and are
+// delivered on resume; QoS 0 messages are dropped instead. Offline members
+// of shared groups are skipped: group selection lands elsewhere.
 func (s *Server) deliver(sender *conn, pk *packet.Packet, now time.Time) (matched bool) {
 	subs := s.topics.Subscribers(pk.TopicName)
 	senderID := ""
@@ -133,13 +135,50 @@ func (s *Server) deliver(sender *conn, pk *packet.Packet, now time.Time) (matche
 		}
 		matched = true
 		target := s.lookupConn(id)
-		if target == nil || target.isStopped() || target.sessionClient() == nil ||
-			target.sessionClient().TakenOver() {
-			continue // offline; shared-group selection lands elsewhere next time
+		if target == nil || target.sessionClient() == nil || target.sessionClient().TakenOver() {
+			continue
+		}
+		if target.isStopped() {
+			if sub.Shared == "" {
+				s.queueOffline(target, sub, pk, now)
+			}
+			continue
 		}
 		s.deliverTo(target, sub, pk, now, false)
 	}
 	return matched
+}
+
+// queueOffline stores a QoS 1/2 message in the outbound inflight window of a
+// disconnected persistent session (docs/design/persistence.md): it is
+// persisted like any inflight entry and promoted by PromoteQueued when the
+// client resumes. QoS 0 messages are dropped, matching the pre-persistence
+// behavior.
+func (s *Server) queueOffline(target *conn, sub topics.Subscription, pk *packet.Packet, now time.Time) {
+	client := target.sessionClient()
+	out := buildDelivery(client, sub, pk, now, false)
+	if out == nil {
+		s.Stats.MessagesDropped.Add(1)
+		return // expired
+	}
+	if out.FixedHeader.Qos == 0 {
+		return // QoS 0 is not queued for offline sessions
+	}
+	if !fitsPeerMaximum(client, out) {
+		s.Stats.MessagesOversized.Add(1)
+		return
+	}
+	// Topic alias mappings are connection-scoped [MQTT-3.3.2-6]; the queued
+	// packet must carry its topic name on the wire after a reconnect.
+	out.Properties.TopicAlias = 0
+	out.Properties.TopicAliasFlag = false
+	msg, err := client.QueueOffline(now, out)
+	if err != nil {
+		s.log.Warn("dropping message for offline session", "client", client.ID, "error", err)
+		s.Stats.MessagesDropped.Add(1)
+		return
+	}
+	s.storePutOutbound(client.ID, msg)
 }
 
 // deliverTo builds the per-subscriber PUBLISH and hands it to the session
