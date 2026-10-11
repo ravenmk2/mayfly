@@ -48,6 +48,7 @@ type conn struct {
 	client             *session.Client // nil until CONNECT succeeds
 	info               hook.ClientInfo
 	version            byte
+	connectedAt        time.Time
 	receivedDisconnect bool
 	disconnectReason   byte
 }

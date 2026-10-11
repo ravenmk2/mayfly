@@ -126,7 +126,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 	}
 
 	// Authentication happens before any session state is touched.
-	res, err := s.authn.Authenticate(context.Background(), hook.ConnectInfo{
+	res, err := s.authenticator().Authenticate(context.Background(), hook.ConnectInfo{
 		ClientID:        client.ID,
 		Username:        client.Username,
 		Password:        pk.Connect.Password,
@@ -217,6 +217,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 
 	c.mu.Lock()
 	c.client = client
+	c.connectedAt = s.now()
 	c.info = hook.ClientInfo{
 		ClientID:   client.ID,
 		Username:   client.Username,
@@ -321,7 +322,7 @@ func (c *conn) onSubscribe(pk *packet.Packet) error {
 		if f.Identifier != 0 {
 			sub.Identifiers = []uint32{f.Identifier}
 		}
-		if !s.authz.Allow(context.Background(), info, hook.OpSubscribe, f.Filter) {
+		if !s.authorizer().Allow(context.Background(), info, hook.OpSubscribe, f.Filter) {
 			s.Stats.ACLDenied.Add(1)
 			s.log.Debug("subscribe denied", "client", client.ID, "filter", f.Filter)
 			codes = append(codes, denyCode)

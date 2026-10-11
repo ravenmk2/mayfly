@@ -49,6 +49,21 @@ func (x *Index) RetainedCount() int {
 	return len(x.retained)
 }
 
+// RetainedMessages returns every stored retained message sorted by topic
+// name. It serves the management API's retained listing.
+func (x *Index) RetainedMessages() []packet.Packet {
+	x.retainedMu.RLock()
+	out := make([]packet.Packet, 0, len(x.retained))
+	for _, pk := range x.retained {
+		out = append(out, pk)
+	}
+	x.retainedMu.RUnlock()
+	slices.SortFunc(out, func(a, b packet.Packet) int {
+		return strings.Compare(a.TopicName, b.TopicName)
+	})
+	return out
+}
+
 // Messages returns the retained messages matching the subscription's filter
 // for delivery at subscribe time, honouring Retain Handling [MQTT-3.8.3-1]:
 // 0 always delivers, 1 delivers only when the subscription is new
