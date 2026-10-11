@@ -16,6 +16,7 @@ func (c *Client) MigrateFrom(old *Client) {
 	for k, sub := range old.subscriptions {
 		c.subscriptions[k] = sub
 	}
+	c.CreatedAt = old.CreatedAt
 	outMax, inMax := c.outbound.max, c.inbound.max
 	c.ids = old.ids
 	c.outbound = old.outbound

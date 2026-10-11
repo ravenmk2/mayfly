@@ -70,6 +70,10 @@ type Client struct {
 	// Will is the Will Message, nil when the client did not set one.
 	Will *Will
 
+	// CreatedAt records when the session was first established (persistence
+	// bookkeeping). The broker sets it via MarkCreated.
+	CreatedAt time.Time
+
 	subscriptions map[string]topics.Subscription
 
 	inboundAliases   map[uint16]string // alias -> topic, client -> broker
@@ -155,6 +159,16 @@ func (c *Client) TakeOver() {
 // TakenOver reports whether the session was replaced by a newer connection.
 func (c *Client) TakenOver() bool {
 	return c.takenOver.Load()
+}
+
+// MarkCreated records when the session was first established. It is set
+// once at CONNECT time and migrates with the session on takeover.
+func (c *Client) MarkCreated(t time.Time) {
+	c.mu.Lock()
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt = t
+	}
+	c.mu.Unlock()
 }
 
 // MarkStopped records the disconnect time that ExpiryDeadline works from.
