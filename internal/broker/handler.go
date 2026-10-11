@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ravenmk2/mayfly/internal/hook"
+	"github.com/ravenmk2/mayfly/internal/listener"
 	"github.com/ravenmk2/mayfly/internal/packet"
 	"github.com/ravenmk2/mayfly/internal/session"
 	"github.com/ravenmk2/mayfly/internal/store"
@@ -115,6 +116,13 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		if pk.Properties.RequestProblemInfoFlag && pk.Properties.RequestProblemInfo == 0 {
 			c.omitReasonString.Store(true)
 		}
+	}
+
+	// An mTLS listener configured with use_cn_as_username vouches for the
+	// client identity: the verified certificate CN replaces any CONNECT
+	// username (docs/design/listeners.md section 2).
+	if lc, ok := c.nc.(*listener.Conn); ok && lc.CertUsername != "" {
+		client.Username = lc.CertUsername
 	}
 
 	// Authentication happens before any session state is touched.
