@@ -176,26 +176,24 @@ type ACLRule struct {
 // (docs/design/auth.md section 6). It also implements the management write
 // interface consumed by the admin API.
 type DBSource struct {
-	db      *sql.DB
-	backend Backend
-	users   atomic.Pointer[map[string]userRecord]
-	rules   atomic.Pointer[RuleSet]
-	gen     atomic.Uint64
+	db       *sql.DB
+	backend  Backend
+	migrated atomic.Bool
+	users    atomic.Pointer[map[string]userRecord]
+	rules    atomic.Pointer[RuleSet]
+	gen      atomic.Uint64
 }
 
-// NewDBSource opens the pool, runs migrations and performs the initial
-// load. A load failure is returned but the source stays usable: it denies
-// until a Reload succeeds against a recovered database.
+// NewDBSource opens the pool and performs the initial migration and load.
+// DSN parsing errors are fatal (nil source); migration and load failures
+// are returned with a live fail-closed source so a later Reload can recover
+// once the database comes back.
 func NewDBSource(ctx context.Context, dsn string) (*DBSource, error) {
 	db, backend, err := OpenDB(dsn)
 	if err != nil {
 		return nil, err
 	}
 	s := &DBSource{db: db, backend: backend}
-	if err := migrate(ctx, db, backend); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	return s, s.Reload(ctx)
 }
 
@@ -205,9 +203,16 @@ func (s *DBSource) Backend() Backend { return s.backend }
 // Close releases the connection pool.
 func (s *DBSource) Close() error { return s.db.Close() }
 
-// Reload rebuilds the in-memory snapshots from the database and swaps them
-// atomically. On error the previous snapshots keep serving.
+// Reload migrates the schema when needed, rebuilds the in-memory snapshots
+// from the database and swaps them atomically. On error the previous
+// snapshots keep serving.
 func (s *DBSource) Reload(ctx context.Context) error {
+	if !s.migrated.Load() {
+		if err := migrate(ctx, s.db, s.backend); err != nil {
+			return err
+		}
+		s.migrated.Store(true)
+	}
 	users, err := s.loadUsers(ctx)
 	if err != nil {
 		return err
