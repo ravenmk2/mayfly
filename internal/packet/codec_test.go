@@ -93,6 +93,7 @@ func TestFixedHeaderDecode(t *testing.T) {
 		{"connect", []byte{0x10, 0x0A}, FixedHeader{Type: Connect, Remaining: 10}, 2},
 		{"publish qos1 dup retain", []byte{0x3B, 0x05}, FixedHeader{Type: Publish, Dup: true, Qos: 1, Retain: true, Remaining: 5}, 2},
 		{"pubrel flags 0010", []byte{0x62, 0x02}, FixedHeader{Type: Pubrel, Remaining: 2}, 2},
+		{"pubrel flags 1010 dup", []byte{0x6A, 0x02}, FixedHeader{Type: Pubrel, Dup: true, Remaining: 2}, 2},
 		{"subscribe flags 0010", []byte{0x82, 0x08}, FixedHeader{Type: Subscribe, Remaining: 8}, 2},
 		{"unsubscribe flags 0010", []byte{0xA2, 0x06}, FixedHeader{Type: Unsubscribe, Remaining: 6}, 2},
 		{"long remaining", []byte{0x30, 0xFF, 0x7F}, FixedHeader{Type: Publish, Remaining: 16383}, 3},

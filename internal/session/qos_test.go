@@ -193,6 +193,10 @@ func TestOutboundQoS2FullHandshake(t *testing.T) {
 	pubrel, err = c.ReceivePubrec(send.PacketID)
 	require.NoError(t, err)
 	assert.True(t, pubrel.FixedHeader.Dup)
+	// The DUP flag must reach the wire: first byte 0x6A [MQTT-3.6.1-1].
+	raw, err := pubrel.Encode()
+	require.NoError(t, err)
+	assert.Equal(t, byte(0x6A), raw[0])
 
 	// PUBCOMP completes the message.
 	assert.Nil(t, c.ReceivePubcomp(send.PacketID))

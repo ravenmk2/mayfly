@@ -54,7 +54,9 @@ var TypeNames = map[byte]string{
 
 // requiredFlags holds the fixed header flag bits mandated for each packet
 // type [MQTT-2.1.3-1]. PUBLISH flags carry per-message semantics (DUP, QoS,
-// RETAIN) and are validated separately, as is the reserved type 0.
+// RETAIN) and are validated separately, as is the reserved type 0. PUBREL is
+// the one other exception: its DUP flag (bit 3) may be set on retransmission
+// [MQTT-3.6.1-1], so decode and encode handle it specially.
 var requiredFlags = [16]byte{
 	0xff, // 0 is reserved and always invalid
 	0,    // CONNECT
@@ -112,6 +114,16 @@ func (fh *FixedHeader) decode(b []byte) (int, error) {
 		}
 	} else {
 		fh.Dup, fh.Qos, fh.Retain = false, 0, false
+		if t == Pubrel {
+			// PUBREL retransmissions carry DUP=1: flags 0010 and 1010 are
+			// both legal (bits 2,1,0 are reserved and MUST be 0,1,0)
+			// [MQTT-3.6.1-1].
+			if flags != 0x02 && flags != 0x0A {
+				return 0, errMalformed("invalid fixed header flags 0x%x for PUBREL", flags)
+			}
+			fh.Dup = flags&0x08 != 0
+			return fh.setRemaining(b[1:])
+		}
 		if flags != requiredFlags[t] {
 			// Reserved flag bits MUST be set exactly as specified
 			// [MQTT-2.1.3-1].
@@ -126,8 +138,20 @@ func (fh *FixedHeader) decode(b []byte) (int, error) {
 	return 1 + n, nil
 }
 
+// setRemaining decodes the Remaining Length field, shared by the PUBREL
+// exception and the common path.
+func (fh *FixedHeader) setRemaining(b []byte) (int, error) {
+	remaining, n, err := decodeVarint(b)
+	if err != nil {
+		return 0, err
+	}
+	fh.Remaining = remaining
+	return 1 + n, nil
+}
+
 // encodeByte returns the first byte of the fixed header. Non-PUBLISH types
-// always use their mandated flag bits [MQTT-2.1.3-1].
+// always use their mandated flag bits [MQTT-2.1.3-1], except PUBREL, whose
+// DUP flag is set on retransmission [MQTT-3.6.1-1].
 func (fh FixedHeader) encodeByte() byte {
 	if fh.Type == Publish {
 		var flags byte
@@ -140,7 +164,11 @@ func (fh FixedHeader) encodeByte() byte {
 		}
 		return fh.Type<<4 | flags
 	}
-	return fh.Type<<4 | requiredFlags[fh.Type]
+	flags := requiredFlags[fh.Type]
+	if fh.Type == Pubrel && fh.Dup {
+		flags |= 0x08
+	}
+	return fh.Type<<4 | flags
 }
 
 // Subscription represents a single topic filter subscription within a

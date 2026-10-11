@@ -154,6 +154,28 @@ func goldenCases() []goldenCase {
 			},
 		},
 		{
+			// DUP=1 retransmission: flags 1010 [MQTT-3.6.1-1].
+			name:    "pubrel v3.1.1 dup retransmission",
+			version: Version311,
+			raw:     []byte{0x6A, 0x02, 0x00, 0x2A},
+			packet: Packet{
+				FixedHeader:     FixedHeader{Type: Pubrel, Dup: true, Remaining: 2},
+				ProtocolVersion: Version311,
+				PacketID:        42,
+			},
+		},
+		{
+			name:    "pubrel v5 dup with reason code",
+			version: Version5,
+			raw:     []byte{0x6A, 0x03, 0x00, 0x2A, 0x92},
+			packet: Packet{
+				FixedHeader:     FixedHeader{Type: Pubrel, Dup: true, Remaining: 3},
+				ProtocolVersion: Version5,
+				PacketID:        42,
+				ReasonCode:      CodePacketIdentifierNotFound,
+			},
+		},
+		{
 			name:    "pubcomp v5 shortest form",
 			version: Version5,
 			raw:     []byte{0x70, 0x02, 0x00, 0x2A},
