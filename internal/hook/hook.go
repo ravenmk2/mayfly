@@ -114,6 +114,13 @@ type Authorizer interface {
 	Authorize(ctx context.Context, client ClientInfo, op Op, topic string) Verdict
 }
 
+// Gate is the broker-facing authorization decision point: a boolean
+// allow/deny for one operation. AuthzChain implements it.
+type Gate interface {
+	// Allow reports whether the client may perform op on topic.
+	Allow(ctx context.Context, client ClientInfo, op Op, topic string) bool
+}
+
 // AuthChain runs the authentication chain in configuration order
 // (ordered fall-through, docs/design/auth.md section 2):
 //
@@ -159,8 +166,8 @@ func NewAuthzChain(sources ...Authorizer) *AuthzChain {
 	return &AuthzChain{sources: sources}
 }
 
-// Authorize reports whether the client may perform op on topic.
-func (c *AuthzChain) Authorize(ctx context.Context, client ClientInfo, op Op, topic string) bool {
+// Allow implements Gate over the whole chain.
+func (c *AuthzChain) Allow(ctx context.Context, client ClientInfo, op Op, topic string) bool {
 	if client.Superuser {
 		return true
 	}

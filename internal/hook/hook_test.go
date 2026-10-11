@@ -77,23 +77,23 @@ func TestAuthzChainStopsOnFirstHit(t *testing.T) {
 		stubAuthz{verdict: VerdictDeny},
 		stubAuthz{verdict: VerdictAllow}, // never reached
 	)
-	assert.False(t, chain.Authorize(context.Background(), ClientInfo{}, OpPublish, "a/b"))
+	assert.False(t, chain.Allow(context.Background(), ClientInfo{}, OpPublish, "a/b"))
 
 	chain = NewAuthzChain(
 		stubAuthz{verdict: VerdictIgnore},
 		stubAuthz{verdict: VerdictAllow},
 	)
-	assert.True(t, chain.Authorize(context.Background(), ClientInfo{}, OpSubscribe, "a/#"))
+	assert.True(t, chain.Allow(context.Background(), ClientInfo{}, OpSubscribe, "a/#"))
 }
 
 func TestAuthzChainAllMissDenies(t *testing.T) {
 	chain := NewAuthzChain(stubAuthz{verdict: VerdictIgnore})
-	assert.False(t, chain.Authorize(context.Background(), ClientInfo{}, OpPublish, "a/b"))
+	assert.False(t, chain.Allow(context.Background(), ClientInfo{}, OpPublish, "a/b"))
 }
 
 func TestAuthzChainSuperuserSkipsSources(t *testing.T) {
 	chain := NewAuthzChain(stubAuthz{verdict: VerdictDeny})
-	assert.True(t, chain.Authorize(context.Background(), ClientInfo{Superuser: true}, OpPublish, "$SYS/broker"))
+	assert.True(t, chain.Allow(context.Background(), ClientInfo{Superuser: true}, OpPublish, "$SYS/broker"))
 }
 
 func TestAllowAllStub(t *testing.T) {
