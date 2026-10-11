@@ -1,12 +1,20 @@
-// Package listener normalizes the transports the broker serves (TCP now,
-// TLS/WS/WSS later) to net.Conn (docs/design/listeners.md section 1).
+// Package listener normalizes the transports the broker serves (TCP, TLS,
+// WS and WSS) to net.Conn (docs/design/listeners.md section 1).
 package listener
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net"
 	"time"
+)
+
+// Transport type names shared with the configuration model.
+const (
+	TypeTCP = "tcp"
+	TypeTLS = "tls"
+	TypeWS  = "ws"
+	TypeWSS = "wss"
 )
 
 // EstablishFunc is called once per accepted connection, in its own
@@ -28,17 +36,22 @@ type Listener interface {
 	Addr() string
 }
 
-// ErrMaxConnections is returned by TCP.Serve's accept loop when a connection
-// is rejected because the listener-level connection limit is reached.
-var ErrMaxConnections = errors.New("listener: max connections reached")
-
 // Conn wraps an accepted connection with its listener metadata.
 type Conn struct {
 	net.Conn
 	// ListenerID identifies the listener the connection arrived on.
 	ListenerID string
+	// CertUsername is the Common Name of the verified client certificate on
+	// mTLS listeners configured with use_cn_as_username; empty otherwise.
+	// The broker presents it as the authentication username.
+	CertUsername string
 }
 
 // drainTimeout bounds how long Close waits for in-flight connections to
 // finish before forcing them shut.
 const drainTimeout = 5 * time.Second
+
+// errBind formats a listen failure with the listener address.
+func errBind(addr string, err error) error {
+	return fmt.Errorf("listener: bind %s: %w", addr, err)
+}
