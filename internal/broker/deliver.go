@@ -28,12 +28,14 @@ func (s *Server) publishFrom(c *conn, pk *packet.Packet) error {
 	// Publish authorization is checked once at ingress; delivery does not
 	// re-check per subscriber (architecture decision A5).
 	if !s.authz.Allow(context.Background(), c.clientInfo(), hook.OpPublish, topic) {
+		s.Stats.ACLDenied.Add(1)
 		s.Stats.MessagesDropped.Add(1)
 		s.log.Debug("publish denied", "client", client.ID, "topic", topic)
 		// QoS 1/2 handshakes still complete so the client can proceed.
 		c.ackDeniedPublish(pk)
 		return nil
 	}
+	s.Stats.ACLAllowed.Add(1)
 
 	// Compute the Message Expiry deadline once so QoS 0/1 messages, which
 	// bypass the inbound inflight store, expire consistently.
@@ -78,7 +80,7 @@ func (s *Server) releaseQoS2(c *conn, pk *packet.Packet) {
 // route stores a deliverable message when retained and fans it out,
 // reporting whether any subscription matched.
 func (s *Server) route(sender *conn, pk *packet.Packet, now time.Time) (matched bool) {
-	s.Stats.MessagesReceived.Add(1)
+	s.Stats.AddReceived(pk.FixedHeader.Qos)
 	if pk.FixedHeader.Retain {
 		s.retain(*pk)
 	}

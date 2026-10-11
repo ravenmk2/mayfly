@@ -150,6 +150,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		c.rejectConnect(client.ProtocolVersion, code)
 		return errNormalClose
 	}
+	s.Stats.AuthSucceeded.Add(1)
 
 	// Empty Client Identifier: assign one when the client starts a fresh
 	// session, reject persistent sessions without an identifier
@@ -317,10 +318,12 @@ func (c *conn) onSubscribe(pk *packet.Packet) error {
 			sub.Identifiers = []uint32{f.Identifier}
 		}
 		if !s.authz.Allow(context.Background(), info, hook.OpSubscribe, f.Filter) {
+			s.Stats.ACLDenied.Add(1)
 			s.log.Debug("subscribe denied", "client", client.ID, "filter", f.Filter)
 			codes = append(codes, denyCode)
 			continue
 		}
+		s.Stats.ACLAllowed.Add(1)
 		// Subscribe splits the shared prefix into sub.Shared / sub.Filter.
 		existed, err := s.topics.Subscribe(client.ID, sub)
 		if err != nil {

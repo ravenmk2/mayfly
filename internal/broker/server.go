@@ -16,6 +16,7 @@ import (
 
 	"github.com/ravenmk2/mayfly/internal/hook"
 	"github.com/ravenmk2/mayfly/internal/listener"
+	"github.com/ravenmk2/mayfly/internal/metrics"
 	"github.com/ravenmk2/mayfly/internal/packet"
 	"github.com/ravenmk2/mayfly/internal/session"
 	"github.com/ravenmk2/mayfly/internal/store"
@@ -83,6 +84,9 @@ type Options struct {
 	// New synchronously recovers the persisted state before any listener
 	// accepts connections.
 	Store store.Store
+	// Metrics receives the broker counters (docs/design/observability.md);
+	// nil selects a fresh zero-value set.
+	Metrics *metrics.Metrics
 	// Logger receives broker log records; nil selects slog.Default().
 	Logger *slog.Logger
 }
@@ -118,26 +122,12 @@ func (o *Options) normalize() {
 	if o.Authorizer == nil {
 		o.Authorizer = hook.NewAuthzChain(hook.AllowAll{})
 	}
+	if o.Metrics == nil {
+		o.Metrics = metrics.New("")
+	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
-}
-
-// Stats holds the broker counters; all fields are atomics safe for
-// concurrent reads.
-type Stats struct {
-	ConnectionsTotal   atomic.Int64
-	ConnectionsCurrent atomic.Int64
-	MessagesReceived   atomic.Int64 // PUBLISH packets received from clients
-	MessagesSent       atomic.Int64 // PUBLISH packets queued to clients
-	// MessagesDropped counts QoS 0 messages dropped because the outbound
-	// queue was full (architecture section 3).
-	MessagesDropped atomic.Int64
-	// MessagesOversized counts messages dropped because they exceeded the
-	// Maximum Packet Size the receiving client declared in CONNECT — a
-	// "the peer cannot hold this" drop, distinct from backpressure.
-	MessagesOversized atomic.Int64
-	AuthFailures      atomic.Int64
 }
 
 // sessionExpiryItem is one node of the disconnected-session expiry min-heap
@@ -172,8 +162,8 @@ type Server struct {
 	wills  session.WillScheduler
 	store  store.Store
 
-	// Stats groups the exported counters.
-	Stats Stats
+	// Stats groups the exported counters (docs/design/observability.md).
+	Stats *metrics.Metrics
 
 	mu        sync.RWMutex
 	clients   map[string]*conn // client ID -> connection (offline sessions included)
@@ -203,6 +193,7 @@ func New(opts Options) *Server {
 		authn:   opts.Authenticator,
 		authz:   opts.Authorizer,
 		store:   opts.Store,
+		Stats:   opts.Metrics,
 		clients: make(map[string]*conn),
 		runDone: make(chan struct{}),
 		now:     time.Now,

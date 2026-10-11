@@ -217,6 +217,7 @@ func (c *conn) readPacket(br *bufio.Reader) (*packet.Packet, error) {
 	if err := pk.Decode(raw); err != nil {
 		return nil, err
 	}
+	c.server.Stats.BytesReceived.Add(int64(len(raw)))
 	return pk, nil
 }
 
@@ -322,8 +323,9 @@ func (c *conn) encodePacket(w *bufio.Writer, pk *packet.Packet) bool {
 		c.server.log.Debug("write failed", "conn", c.id, "error", err)
 		return false
 	}
+	c.server.Stats.BytesSent.Add(int64(len(b)))
 	if pk.FixedHeader.Type == packet.Publish {
-		c.server.Stats.MessagesSent.Add(1)
+		c.server.Stats.AddSent(pk.FixedHeader.Qos)
 	}
 	return true
 }
