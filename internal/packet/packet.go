@@ -246,6 +246,10 @@ func (pk *Packet) Decode(b []byte) error {
 		return pk.connectDecode(body)
 	case Connack:
 		return pk.connackDecode(body)
+	case Publish:
+		return pk.publishDecode(body)
+	case Puback, Pubrec, Pubrel, Pubcomp:
+		return pk.pubackDecode(body)
 	case Pingreq:
 		return pk.pingreqDecode(body)
 	case Pingresp:
@@ -286,6 +290,10 @@ func (pk *Packet) encodeBody(dst *[]byte) error {
 		return pk.connectEncode(dst)
 	case Connack:
 		return pk.connackEncode(dst)
+	case Publish:
+		return pk.publishEncode(dst)
+	case Puback, Pubrec, Pubrel, Pubcomp:
+		return pk.pubackEncode(dst)
 	case Pingreq, Pingresp:
 		return nil
 	case Disconnect:
@@ -302,6 +310,10 @@ func (pk *Packet) Validate() error {
 		return pk.connectValidate()
 	case Connack:
 		return pk.connackValidate()
+	case Publish:
+		return pk.publishValidate()
+	case Puback, Pubrec, Pubrel, Pubcomp:
+		return pk.pubackValidate()
 	case Disconnect:
 		return pk.disconnectValidate()
 	default:
