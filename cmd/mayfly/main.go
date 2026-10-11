@@ -20,6 +20,7 @@ import (
 	"github.com/ravenmk2/mayfly/internal/config"
 	"github.com/ravenmk2/mayfly/internal/hook"
 	"github.com/ravenmk2/mayfly/internal/listener"
+	"github.com/ravenmk2/mayfly/internal/metrics"
 	"github.com/ravenmk2/mayfly/internal/server"
 	"github.com/ravenmk2/mayfly/internal/store"
 )
@@ -203,6 +204,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listener setup: %v", err)
 	}
+	m := metrics.New(version)
 	b := broker.New(broker.Options{
 		MaxConnections:     cfg.Broker.MaxConnections,
 		MaxPacketSize:      cfg.Broker.MaxPacketSize,
@@ -213,10 +215,22 @@ func main() {
 		Authenticator:      authn,
 		Authorizer:         authz,
 		Store:              st,
+		Metrics:            m,
 	})
 	for _, l := range listeners {
 		b.AddListener(l)
 	}
+
+	// The $SYS publisher republishes the broker status as retained
+	// $SYS/broker/... messages on its cadence; a negative sys_interval
+	// disables it (docs/design/observability.md section 2).
+	sysPub := metrics.NewSysPublisher(m, metrics.SysOptions{
+		Interval: time.Duration(cfg.Metrics.SysInterval),
+		Publish:  func(topic string, payload []byte) error { return b.Publish(topic, payload, true) },
+		Refresh:  b.RefreshMetrics,
+		Logger:   logger,
+	})
+	go sysPub.Run(ctx)
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- b.Run(ctx) }()

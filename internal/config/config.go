@@ -160,6 +160,13 @@ type LogConfig struct {
 	Output string `yaml:"output"`
 }
 
+// MetricsConfig configures observability (docs/design/observability.md).
+type MetricsConfig struct {
+	// SysInterval is the $SYS publish period; zero selects the default 10s,
+	// a negative value disables $SYS publishing.
+	SysInterval Duration `yaml:"sys_interval"`
+}
+
 // AdminConfig configures the console/REST listener.
 type AdminConfig struct {
 	// Addr is the listen address of the admin HTTP server.
@@ -175,6 +182,7 @@ type Config struct {
 	Store     StoreConfig      `yaml:"store"`
 	Auth      AuthConfig       `yaml:"auth"`
 	Log       LogConfig        `yaml:"log"`
+	Metrics   MetricsConfig    `yaml:"metrics"`
 	Admin     AdminConfig      `yaml:"admin"`
 }
 
