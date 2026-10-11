@@ -24,6 +24,7 @@ mayfly/
 - docs/design/setup.md：安装向导、数据目录、主密钥
 - docs/design/persistence.md：持久化 Store 接口与异步批量
 - docs/design/listeners.md：TCP/TLS/WS/WSS 监听器
+- docs/design/configuration.md：YAML 配置 + MAYFLY_* env 覆盖 + 校验
 - docs/design/observability.md：$SYS、Prometheus、日志
 - docs/design/admin-api.md：管理 REST API 与 Console
 - docs/design/testing.md：分层测试策略
