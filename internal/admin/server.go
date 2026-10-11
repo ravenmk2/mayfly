@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -61,6 +62,9 @@ type Server struct {
 	authMgr     *auth.Manager
 	initialized bool
 
+	// setupMu serializes concurrent wizard submissions.
+	setupMu sync.Mutex
+
 	// ctx drives the background refresh of swapped-in chain managers.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -76,14 +80,22 @@ func NewServer(opts Options) *Server {
 		logger = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	dataDir := opts.DataDir
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	configPath := opts.ConfigPath
+	if configPath == "" {
+		configPath = filepath.Join(dataDir, "mayfly.yaml")
+	}
 	s := &Server{
 		log:         logger,
 		store:       opts.Store,
 		version:     opts.Version,
 		broker:      opts.Broker,
 		apply:       opts.ApplyChains,
-		dataDir:     opts.DataDir,
-		configPath:  opts.ConfigPath,
+		dataDir:     dataDir,
+		configPath:  configPath,
 		masterKey:   opts.MasterKey,
 		authMgr:     opts.AuthManager,
 		initialized: opts.Initialized,
@@ -119,6 +131,9 @@ func (s *Server) RegisterRoutes(e *echo.Echo) {
 	g := e.Group("/api/v1", s.logRequest, s.setupGate)
 
 	g.POST("/login", s.login)
+	g.GET("/setup/status", s.setupStatus)
+	g.POST("/setup/test-db", s.setupTestDB)
+	g.POST("/setup", s.setup)
 
 	g.GET("/apikeys", s.listAPIKeys, s.requireAuth(ScopeAdmin))
 	g.POST("/apikeys", s.createAPIKey, s.requireAuth(ScopeAdmin))

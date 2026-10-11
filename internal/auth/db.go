@@ -200,6 +200,18 @@ func NewDBSource(ctx context.Context, dsn string) (*DBSource, error) {
 	return s, s.Reload(ctx)
 }
 
+// Migrate applies the schema migrations to the database at dsn and closes
+// the pool again. It serves setup flows that only need the schema, not a
+// live source.
+func Migrate(ctx context.Context, dsn string) error {
+	db, backend, err := OpenDB(dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return migrate(ctx, db, backend)
+}
+
 // Backend reports the SQL dialect in use.
 func (s *DBSource) Backend() Backend { return s.backend }
 
