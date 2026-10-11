@@ -250,12 +250,22 @@ func (pk *Packet) Decode(b []byte) error {
 		return pk.publishDecode(body)
 	case Puback, Pubrec, Pubrel, Pubcomp:
 		return pk.pubackDecode(body)
+	case Subscribe:
+		return pk.subscribeDecode(body)
+	case Suback:
+		return pk.subackDecode(body)
+	case Unsubscribe:
+		return pk.unsubscribeDecode(body)
+	case Unsuback:
+		return pk.unsubackDecode(body)
 	case Pingreq:
 		return pk.pingreqDecode(body)
 	case Pingresp:
 		return pk.pingrespDecode(body)
 	case Disconnect:
 		return pk.disconnectDecode(body)
+	case Auth:
+		return pk.authDecode(body)
 	default:
 		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
 	}
@@ -294,10 +304,20 @@ func (pk *Packet) encodeBody(dst *[]byte) error {
 		return pk.publishEncode(dst)
 	case Puback, Pubrec, Pubrel, Pubcomp:
 		return pk.pubackEncode(dst)
+	case Subscribe:
+		return pk.subscribeEncode(dst)
+	case Suback:
+		return pk.subackEncode(dst)
+	case Unsubscribe:
+		return pk.unsubscribeEncode(dst)
+	case Unsuback:
+		return pk.unsubackEncode(dst)
 	case Pingreq, Pingresp:
 		return nil
 	case Disconnect:
 		return pk.disconnectEncode(dst)
+	case Auth:
+		return pk.authEncode(dst)
 	default:
 		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
 	}
@@ -305,6 +325,9 @@ func (pk *Packet) encodeBody(dst *[]byte) error {
 
 // Validate checks the semantic constraints of the packet for its type.
 func (pk *Packet) Validate() error {
+	if pk.FixedHeader.Type < Connect || pk.FixedHeader.Type > Auth {
+		return errMalformed("unsupported packet type %d", pk.FixedHeader.Type)
+	}
 	switch pk.FixedHeader.Type {
 	case Connect:
 		return pk.connectValidate()
@@ -314,8 +337,18 @@ func (pk *Packet) Validate() error {
 		return pk.publishValidate()
 	case Puback, Pubrec, Pubrel, Pubcomp:
 		return pk.pubackValidate()
+	case Subscribe:
+		return pk.subscribeValidate()
+	case Suback:
+		return pk.subackValidate()
+	case Unsubscribe:
+		return pk.unsubscribeValidate()
+	case Unsuback:
+		return pk.unsubackValidate()
 	case Disconnect:
 		return pk.disconnectValidate()
+	case Auth:
+		return pk.authValidate()
 	default:
 		return nil
 	}
