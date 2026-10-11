@@ -126,11 +126,12 @@ func (c *Client) EnqueuePublish(now time.Time, pk *packet.Packet) (send *packet.
 	msg.Packet.PacketID = id
 	msg.Packet.FixedHeader.Dup = false
 	msg.Packet.Expiry = msg.Expiry
-	cp := *msg
 	if c.outbound.store(msg) {
 		out := msg.Packet
+		cp := *msg
 		return &out, &cp, nil
 	}
+	cp := *msg
 	return nil, &cp, nil
 }
 
