@@ -47,20 +47,57 @@ func (m *MemoryStore) Inflight() InflightStore          { return memoryInflight{
 func (m *MemoryStore) Retained() RetainedStore          { return memoryRetained{m} }
 func (m *MemoryStore) Close() error                     { return nil }
 
-type memorySessions struct{ m *MemoryStore }
-
-func (ms memorySessions) Put(_ context.Context, s Session) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	ms.m.sessions[s.ClientID] = s
+// applyOps applies a batch in one critical section (batchStore).
+func (m *MemoryStore) applyOps(_ context.Context, ops []op) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, o := range ops {
+		m.applyLocked(o)
+	}
 	return nil
 }
 
-func (ms memorySessions) Delete(_ context.Context, clientID string) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	delete(ms.m.sessions, clientID)
-	return nil
+func (m *MemoryStore) applyLocked(o op) {
+	switch o.kind {
+	case opPutSession:
+		m.sessions[o.session.ClientID] = o.session
+	case opDeleteSession:
+		delete(m.sessions, o.session.ClientID)
+	case opPutSubscription:
+		m.subs[subKey{o.sub.ClientID, o.sub.Filter}] = o.sub
+	case opDeleteSubscription:
+		delete(m.subs, subKey{o.sub.ClientID, o.sub.Filter})
+	case opDeleteSubscriptionsByClient:
+		for k := range m.subs {
+			if k.clientID == o.sub.ClientID {
+				delete(m.subs, k)
+			}
+		}
+	case opPutInflight:
+		m.inflight[inflightKey{o.inflight.ClientID, o.inflight.Direction, o.inflight.PacketID}] = o.inflight
+	case opDeleteInflight:
+		delete(m.inflight, inflightKey{o.inflight.ClientID, o.inflight.Direction, o.inflight.PacketID})
+	case opDeleteInflightByClient:
+		for k := range m.inflight {
+			if k.clientID == o.inflight.ClientID {
+				delete(m.inflight, k)
+			}
+		}
+	case opPutRetained:
+		m.retained[o.retained.Topic] = o.retained
+	case opDeleteRetained:
+		delete(m.retained, o.retained.Topic)
+	}
+}
+
+type memorySessions struct{ m *MemoryStore }
+
+func (ms memorySessions) Put(ctx context.Context, s Session) error {
+	return ms.m.applyOps(ctx, []op{{kind: opPutSession, session: s}})
+}
+
+func (ms memorySessions) Delete(ctx context.Context, clientID string) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteSession, session: Session{ClientID: clientID}}})
 }
 
 func (ms memorySessions) Get(_ context.Context, clientID string) (Session, bool, error) {
@@ -88,29 +125,16 @@ func (ms memorySessions) Iterate(_ context.Context, fn func(Session) bool) error
 
 type memorySubs struct{ m *MemoryStore }
 
-func (ms memorySubs) Put(_ context.Context, sub Subscription) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	ms.m.subs[subKey{sub.ClientID, sub.Filter}] = sub
-	return nil
+func (ms memorySubs) Put(ctx context.Context, sub Subscription) error {
+	return ms.m.applyOps(ctx, []op{{kind: opPutSubscription, sub: sub}})
 }
 
-func (ms memorySubs) Delete(_ context.Context, clientID, filter string) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	delete(ms.m.subs, subKey{clientID, filter})
-	return nil
+func (ms memorySubs) Delete(ctx context.Context, clientID, filter string) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteSubscription, sub: Subscription{ClientID: clientID, Filter: filter}}})
 }
 
-func (ms memorySubs) DeleteByClient(_ context.Context, clientID string) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	for k := range ms.m.subs {
-		if k.clientID == clientID {
-			delete(ms.m.subs, k)
-		}
-	}
-	return nil
+func (ms memorySubs) DeleteByClient(ctx context.Context, clientID string) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteSubscriptionsByClient, sub: Subscription{ClientID: clientID}}})
 }
 
 func (ms memorySubs) Iterate(_ context.Context, fn func(Subscription) bool) error {
@@ -136,29 +160,17 @@ func (ms memorySubs) Iterate(_ context.Context, fn func(Subscription) bool) erro
 
 type memoryInflight struct{ m *MemoryStore }
 
-func (ms memoryInflight) Put(_ context.Context, msg InflightMessage) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	ms.m.inflight[inflightKey{msg.ClientID, msg.Direction, msg.PacketID}] = msg
-	return nil
+func (ms memoryInflight) Put(ctx context.Context, msg InflightMessage) error {
+	return ms.m.applyOps(ctx, []op{{kind: opPutInflight, inflight: msg}})
 }
 
-func (ms memoryInflight) Delete(_ context.Context, clientID string, direction Direction, packetID uint16) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	delete(ms.m.inflight, inflightKey{clientID, direction, packetID})
-	return nil
+func (ms memoryInflight) Delete(ctx context.Context, clientID string, direction Direction, packetID uint16) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteInflight,
+		inflight: InflightMessage{ClientID: clientID, Direction: direction, PacketID: packetID}}})
 }
 
-func (ms memoryInflight) DeleteByClient(_ context.Context, clientID string) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	for k := range ms.m.inflight {
-		if k.clientID == clientID {
-			delete(ms.m.inflight, k)
-		}
-	}
-	return nil
+func (ms memoryInflight) DeleteByClient(ctx context.Context, clientID string) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteInflightByClient, inflight: InflightMessage{ClientID: clientID}}})
 }
 
 func (ms memoryInflight) Iterate(_ context.Context, fn func(InflightMessage) bool) error {
@@ -187,18 +199,12 @@ func (ms memoryInflight) Iterate(_ context.Context, fn func(InflightMessage) boo
 
 type memoryRetained struct{ m *MemoryStore }
 
-func (ms memoryRetained) Put(_ context.Context, msg RetainedMessage) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	ms.m.retained[msg.Topic] = msg
-	return nil
+func (ms memoryRetained) Put(ctx context.Context, msg RetainedMessage) error {
+	return ms.m.applyOps(ctx, []op{{kind: opPutRetained, retained: msg}})
 }
 
-func (ms memoryRetained) Delete(_ context.Context, topic string) error {
-	ms.m.mu.Lock()
-	defer ms.m.mu.Unlock()
-	delete(ms.m.retained, topic)
-	return nil
+func (ms memoryRetained) Delete(ctx context.Context, topic string) error {
+	return ms.m.applyOps(ctx, []op{{kind: opDeleteRetained, retained: RetainedMessage{Topic: topic}}})
 }
 
 func (ms memoryRetained) Iterate(_ context.Context, fn func(RetainedMessage) bool) error {

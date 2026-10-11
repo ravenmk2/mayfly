@@ -215,6 +215,94 @@ func (s *SQLStore) Subscriptions() SubscriptionStore { return sqlSubs{s} }
 func (s *SQLStore) Inflight() InflightStore          { return sqlInflight{s} }
 func (s *SQLStore) Retained() RetainedStore          { return sqlRetained{s} }
 
+// execer is satisfied by *sql.DB and *sql.Tx so single writes and batched
+// writes share one statement set.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// applyOps commits a batch of write ops in one transaction (batchStore).
+func (s *SQLStore) applyOps(ctx context.Context, ops []op) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin batch: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, o := range ops {
+		if err := s.execOp(ctx, tx, o); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit batch: %w", err)
+	}
+	return nil
+}
+
+// execOp applies one write op.
+func (s *SQLStore) execOp(ctx context.Context, e execer, o op) error {
+	var err error
+	switch o.kind {
+	case opPutSession:
+		_, err = e.ExecContext(ctx,
+			s.replace+` INTO mf_session (client_id, session_expiry, created_at, stopped_at) VALUES (?, ?, ?, ?)`,
+			o.session.ClientID, o.session.Expiry, unixNanos(o.session.CreatedAt), unixNanos(o.session.StoppedAt))
+	case opDeleteSession:
+		_, err = e.ExecContext(ctx, `DELETE FROM mf_session WHERE client_id = ?`, o.session.ClientID)
+	case opPutSubscription:
+		var subID any
+		if o.sub.Identifier != 0 {
+			subID = o.sub.Identifier
+		}
+		_, err = e.ExecContext(ctx,
+			s.replace+` INTO mf_subscription (client_id, filter, qos, no_local, retain_as_published, retain_handling, sub_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			o.sub.ClientID, o.sub.Filter, o.sub.Qos, o.sub.NoLocal, o.sub.RetainAsPublished, o.sub.RetainHandling, subID)
+	case opDeleteSubscription:
+		_, err = e.ExecContext(ctx, `DELETE FROM mf_subscription WHERE client_id = ? AND filter = ?`,
+			o.sub.ClientID, o.sub.Filter)
+	case opDeleteSubscriptionsByClient:
+		_, err = e.ExecContext(ctx, `DELETE FROM mf_subscription WHERE client_id = ?`, o.sub.ClientID)
+	case opPutInflight:
+		var raw []byte
+		raw, err = encodeInflight(o.inflight)
+		if err != nil {
+			return fmt.Errorf("store: encode inflight packet: %w", err)
+		}
+		_, err = e.ExecContext(ctx,
+			s.replace+` INTO mf_inflight (client_id, packet_id, direction, packet, expiry) VALUES (?, ?, ?, ?, ?)`,
+			o.inflight.ClientID, o.inflight.PacketID, o.inflight.Direction, raw, unixNanos(o.inflight.Expiry))
+	case opDeleteInflight:
+		_, err = e.ExecContext(ctx,
+			`DELETE FROM mf_inflight WHERE client_id = ? AND direction = ? AND packet_id = ?`,
+			o.inflight.ClientID, o.inflight.Direction, o.inflight.PacketID)
+	case opDeleteInflightByClient:
+		_, err = e.ExecContext(ctx, `DELETE FROM mf_inflight WHERE client_id = ?`, o.inflight.ClientID)
+	case opPutRetained:
+		// A retained packet carries no Packet Identifier (one is assigned per
+		// subscriber at delivery); the wire codec requires one for QoS 1/2, so
+		// a placeholder is encoded and ignored on restore.
+		pk := o.retained.Packet
+		if pk.FixedHeader.Qos > 0 && pk.PacketID == 0 {
+			pk.PacketID = 1
+		}
+		var raw []byte
+		raw, err = encodePacket(pk)
+		if err != nil {
+			return fmt.Errorf("store: encode retained packet: %w", err)
+		}
+		_, err = e.ExecContext(ctx,
+			s.replace+` INTO mf_retained (topic, packet, expiry) VALUES (?, ?, ?)`,
+			o.retained.Topic, raw, unixNanos(o.retained.Expiry))
+	case opDeleteRetained:
+		_, err = e.ExecContext(ctx, `DELETE FROM mf_retained WHERE topic = ?`, o.retained.Topic)
+	}
+	if err != nil {
+		return fmt.Errorf("store: apply %s: %w", o.kind, err)
+	}
+	return nil
+}
+
 // unixNanos converts a time to its stored BIGINT form; the zero time maps
 // to 0 (no timestamp / no expiry).
 func unixNanos(t time.Time) int64 {
@@ -235,21 +323,11 @@ func fromUnixNanos(ns int64) time.Time {
 type sqlSessions struct{ s *SQLStore }
 
 func (ss sqlSessions) Put(ctx context.Context, sess Session) error {
-	_, err := ss.s.db.ExecContext(ctx,
-		ss.s.replace+` INTO mf_session (client_id, session_expiry, created_at, stopped_at) VALUES (?, ?, ?, ?)`,
-		sess.ClientID, sess.Expiry, unixNanos(sess.CreatedAt), unixNanos(sess.StoppedAt))
-	if err != nil {
-		return fmt.Errorf("store: put session: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opPutSession, session: sess})
 }
 
 func (ss sqlSessions) Delete(ctx context.Context, clientID string) error {
-	_, err := ss.s.db.ExecContext(ctx, `DELETE FROM mf_session WHERE client_id = ?`, clientID)
-	if err != nil {
-		return fmt.Errorf("store: delete session: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteSession, session: Session{ClientID: clientID}})
 }
 
 func (ss sqlSessions) Get(ctx context.Context, clientID string) (Session, bool, error) {
@@ -294,35 +372,17 @@ func (ss sqlSessions) Iterate(ctx context.Context, fn func(Session) bool) error 
 type sqlSubs struct{ s *SQLStore }
 
 func (ss sqlSubs) Put(ctx context.Context, sub Subscription) error {
-	var subID any
-	if sub.Identifier != 0 {
-		subID = sub.Identifier
-	}
-	_, err := ss.s.db.ExecContext(ctx,
-		ss.s.replace+` INTO mf_subscription (client_id, filter, qos, no_local, retain_as_published, retain_handling, sub_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		sub.ClientID, sub.Filter, sub.Qos, sub.NoLocal, sub.RetainAsPublished, sub.RetainHandling, subID)
-	if err != nil {
-		return fmt.Errorf("store: put subscription: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opPutSubscription, sub: sub})
 }
 
 func (ss sqlSubs) Delete(ctx context.Context, clientID, filter string) error {
-	_, err := ss.s.db.ExecContext(ctx,
-		`DELETE FROM mf_subscription WHERE client_id = ? AND filter = ?`, clientID, filter)
-	if err != nil {
-		return fmt.Errorf("store: delete subscription: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteSubscription,
+		sub: Subscription{ClientID: clientID, Filter: filter}})
 }
 
 func (ss sqlSubs) DeleteByClient(ctx context.Context, clientID string) error {
-	_, err := ss.s.db.ExecContext(ctx, `DELETE FROM mf_subscription WHERE client_id = ?`, clientID)
-	if err != nil {
-		return fmt.Errorf("store: delete subscriptions by client: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteSubscriptionsByClient,
+		sub: Subscription{ClientID: clientID}})
 }
 
 func (ss sqlSubs) Iterate(ctx context.Context, fn func(Subscription) bool) error {
@@ -351,8 +411,8 @@ func (ss sqlSubs) Iterate(ctx context.Context, fn func(Subscription) bool) error
 }
 
 // encodeInflight serializes an inflight row: the version-prefixed wire
-// packet followed by the outbound bookkeeping flags packed into a trailer
-// byte. Encoding as v5 (via encodePacket) preserves properties either way.
+// packet followed by the outbound bookkeeping flags (sent, PUBREL stage)
+// packed into a trailer byte.
 func encodeInflight(msg InflightMessage) ([]byte, error) {
 	raw, err := encodePacket(msg.Packet)
 	if err != nil {
@@ -368,12 +428,12 @@ func encodeInflight(msg InflightMessage) ([]byte, error) {
 	return append(raw, flags), nil
 }
 
-func decodeInflight(b []byte) (packet.Packet, bool, bool, error) {
+func decodeInflight(b []byte) (pk packet.Packet, sent, pubrel bool, err error) {
 	if len(b) < 3 {
 		return packet.Packet{}, false, false, errors.New("store: persisted inflight packet truncated")
 	}
 	flags := b[len(b)-1]
-	pk, err := decodePacket(b[:len(b)-1])
+	pk, err = decodePacket(b[:len(b)-1])
 	if err != nil {
 		return packet.Packet{}, false, false, err
 	}
@@ -383,34 +443,17 @@ func decodeInflight(b []byte) (packet.Packet, bool, bool, error) {
 type sqlInflight struct{ s *SQLStore }
 
 func (ss sqlInflight) Put(ctx context.Context, msg InflightMessage) error {
-	raw, err := encodeInflight(msg)
-	if err != nil {
-		return fmt.Errorf("store: encode inflight packet: %w", err)
-	}
-	if _, err := ss.s.db.ExecContext(ctx,
-		ss.s.replace+` INTO mf_inflight (client_id, packet_id, direction, packet, expiry) VALUES (?, ?, ?, ?, ?)`,
-		msg.ClientID, msg.PacketID, msg.Direction, raw, unixNanos(msg.Expiry)); err != nil {
-		return fmt.Errorf("store: put inflight: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opPutInflight, inflight: msg})
 }
 
 func (ss sqlInflight) Delete(ctx context.Context, clientID string, direction Direction, packetID uint16) error {
-	_, err := ss.s.db.ExecContext(ctx,
-		`DELETE FROM mf_inflight WHERE client_id = ? AND direction = ? AND packet_id = ?`,
-		clientID, direction, packetID)
-	if err != nil {
-		return fmt.Errorf("store: delete inflight: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteInflight,
+		inflight: InflightMessage{ClientID: clientID, Direction: direction, PacketID: packetID}})
 }
 
 func (ss sqlInflight) DeleteByClient(ctx context.Context, clientID string) error {
-	_, err := ss.s.db.ExecContext(ctx, `DELETE FROM mf_inflight WHERE client_id = ?`, clientID)
-	if err != nil {
-		return fmt.Errorf("store: delete inflight by client: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteInflightByClient,
+		inflight: InflightMessage{ClientID: clientID}})
 }
 
 func (ss sqlInflight) Iterate(ctx context.Context, fn func(InflightMessage) bool) error {
@@ -446,31 +489,11 @@ func (ss sqlInflight) Iterate(ctx context.Context, fn func(InflightMessage) bool
 type sqlRetained struct{ s *SQLStore }
 
 func (ss sqlRetained) Put(ctx context.Context, msg RetainedMessage) error {
-	// A retained packet carries no Packet Identifier (one is assigned per
-	// subscriber at delivery); the wire codec requires one for QoS 1/2, so a
-	// placeholder is encoded and ignored on restore.
-	pk := msg.Packet
-	if pk.FixedHeader.Qos > 0 && pk.PacketID == 0 {
-		pk.PacketID = 1
-	}
-	raw, err := encodePacket(pk)
-	if err != nil {
-		return fmt.Errorf("store: encode retained packet: %w", err)
-	}
-	if _, err := ss.s.db.ExecContext(ctx,
-		ss.s.replace+` INTO mf_retained (topic, packet, expiry) VALUES (?, ?, ?)`,
-		msg.Topic, raw, unixNanos(msg.Expiry)); err != nil {
-		return fmt.Errorf("store: put retained: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opPutRetained, retained: msg})
 }
 
 func (ss sqlRetained) Delete(ctx context.Context, topic string) error {
-	_, err := ss.s.db.ExecContext(ctx, `DELETE FROM mf_retained WHERE topic = ?`, topic)
-	if err != nil {
-		return fmt.Errorf("store: delete retained: %w", err)
-	}
-	return nil
+	return ss.s.execOp(ctx, ss.s.db, op{kind: opDeleteRetained, retained: RetainedMessage{Topic: topic}})
 }
 
 func (ss sqlRetained) Iterate(ctx context.Context, fn func(RetainedMessage) bool) error {
