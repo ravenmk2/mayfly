@@ -198,6 +198,9 @@ func TestOutboundQoS2FullHandshake(t *testing.T) {
 	assert.Nil(t, c.ReceivePubcomp(send.PacketID))
 	assert.Equal(t, 0, c.OutboundLen())
 	assert.Equal(t, 0, c.PacketIDsInUse())
+
+	// Unknown PUBCOMP is ignored.
+	assert.Nil(t, c.ReceivePubcomp(send.PacketID))
 }
 
 func TestOutboundPubrecUnknownID(t *testing.T) {

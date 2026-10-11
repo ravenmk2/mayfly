@@ -90,6 +90,8 @@ func TestOutboundExpiryHeapOrder(t *testing.T) {
 	store(3, 30*time.Second)
 	store(1, 10*time.Second)
 	store(2, 20*time.Second)
+	// Equal deadlines fall back to identifier order.
+	store(5, 20*time.Second)
 	// A message without expiry never enters the heap.
 	o.store(&InflightMessage{Packet: *publishPacket(4, 1, "t"), Sent: true})
 	o.sent++
@@ -100,9 +102,10 @@ func TestOutboundExpiryHeapOrder(t *testing.T) {
 
 	// Expiry drops messages in deadline order, regardless of insertion order.
 	expired := o.dropExpired(base.Add(25 * time.Second))
-	require.Len(t, expired, 2)
+	require.Len(t, expired, 3)
 	assert.Equal(t, uint16(1), expired[0].Packet.PacketID)
 	assert.Equal(t, uint16(2), expired[1].Packet.PacketID)
+	assert.Equal(t, uint16(5), expired[2].Packet.PacketID)
 	assert.Len(t, o.messages, 2)
 
 	// Peek reports the next expiry without dropping it.
