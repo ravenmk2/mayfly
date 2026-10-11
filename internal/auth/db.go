@@ -123,12 +123,15 @@ func migrate(ctx context.Context, db *sql.DB, backend Backend) error {
 	)`); err != nil {
 		return fmt.Errorf("auth: create schema_migrations: %w", err)
 	}
+	// Check for the specific version row instead of MAX(version): the table
+	// is shared with the admin schema, which records its own higher version
+	// (docs/design/admin-api.md section 2).
 	var applied int
-	row := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
+	row := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 1`)
 	if err := row.Scan(&applied); err != nil {
 		return fmt.Errorf("auth: read schema version: %w", err)
 	}
-	if applied >= 1 {
+	if applied > 0 {
 		return nil
 	}
 	tx, err := db.BeginTx(ctx, nil)
