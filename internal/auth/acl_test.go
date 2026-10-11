@@ -15,10 +15,6 @@ func allow(seq int, user, perm, topic string) Rule {
 	return Rule{Seq: seq, Username: user, Action: ActionAllow, Permission: mustPerm(perm), Topic: topic}
 }
 
-func deny(seq int, user, perm, topic string) Rule {
-	return Rule{Seq: seq, Username: user, Action: ActionDeny, Permission: mustPerm(perm), Topic: topic}
-}
-
 // global returns a rule with no subject constraint.
 func global(seq int, action Action, perm Permission, topic string) Rule {
 	return Rule{Seq: seq, Action: action, Permission: perm, Topic: topic}

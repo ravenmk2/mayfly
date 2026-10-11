@@ -245,7 +245,7 @@ func (s *DBSource) loadUsers(ctx context.Context) (map[string]userRecord, error)
 	if err != nil {
 		return nil, fmt.Errorf("auth: load users: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	users := map[string]userRecord{}
 	for rows.Next() {
 		var name, hash string
@@ -264,7 +264,7 @@ func (s *DBSource) loadRules(ctx context.Context, generation uint64) (*RuleSet, 
 	if err != nil {
 		return nil, fmt.Errorf("auth: load acl: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var rules []Rule
 	for rows.Next() {
 		var (
@@ -362,7 +362,7 @@ func (s *DBSource) ListUsers(ctx context.Context) ([]User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: list users: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []User
 	for rows.Next() {
 		var u User
@@ -424,7 +424,7 @@ func (s *DBSource) ListACLRules(ctx context.Context) ([]ACLRule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: list acl rules: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []ACLRule
 	for rows.Next() {
 		var (
