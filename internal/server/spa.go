@@ -15,7 +15,7 @@ func SPAHandler(dist fs.FS) http.Handler {
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if f, err := dist.Open(p); err == nil {
 			st, statErr := f.Stat()
-			f.Close()
+			_ = f.Close()
 			if statErr == nil && !st.IsDir() {
 				fileServer.ServeHTTP(w, r)
 				return
