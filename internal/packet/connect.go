@@ -111,7 +111,9 @@ func (pk *Packet) connectEncode(dst *[]byte) error {
 		level = pk.version()
 	}
 	name := c.ProtocolName
-	if name == "" {
+	if name == "" || name == "MQIsdp" {
+		// MQTT 3.1 is normalized to 3.1.1 on decode; the encoder always
+		// emits the 3.1.1 protocol name for levels 4 and 5.
 		name = "MQTT"
 	}
 	out := encodeString(*dst, name)
@@ -249,7 +251,13 @@ func (pk *Packet) connackEncode(dst *[]byte) error {
 			return err
 		}
 	} else {
-		out = append(out, V5ToV3(Connack, pk.ReasonCode))
+		// ReasonCode holds a v3 return code (0-5) when the packet was
+		// decoded from the wire; v5 reason codes are downgraded.
+		rc := pk.ReasonCode
+		if rc > V3ConnackNotAuthorized {
+			rc = V5ToV3(Connack, rc)
+		}
+		out = append(out, rc)
 	}
 	*dst = out
 	return nil
