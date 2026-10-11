@@ -46,6 +46,10 @@ func (s *Server) publishFrom(c *conn, pk *packet.Packet) error {
 		// The Receive Maximum window was exceeded [MQTT-3.3.4-9].
 		return err
 	}
+	if pk.FixedHeader.Qos == 2 && ack != nil && ack.FixedHeader.Type == packet.Pubrec {
+		// A stored (or duplicate) inbound QoS 2 PUBLISH awaiting its PUBREL.
+		s.storePutInbound(client.ID, pk)
+	}
 
 	matched := false
 	if deliver != nil {
@@ -76,9 +80,7 @@ func (s *Server) releaseQoS2(c *conn, pk *packet.Packet) {
 func (s *Server) route(sender *conn, pk *packet.Packet, now time.Time) (matched bool) {
 	s.Stats.MessagesReceived.Add(1)
 	if pk.FixedHeader.Retain {
-		if err := s.topics.Retain(*pk); err != nil {
-			s.log.Warn("retain failed", "topic", pk.TopicName, "error", err)
-		}
+		s.retain(*pk)
 	}
 	return s.deliver(sender, pk, now)
 }
@@ -164,13 +166,14 @@ func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Pac
 			"client", client.ID, "topic", out.TopicName)
 		return
 	}
-	send, err := client.SendPublish(now, out)
+	send, stored, err := client.EnqueuePublish(now, out)
 	if err != nil {
 		// Packet identifiers exhausted: an effectively unreachable state.
 		s.log.Warn("dropping undeliverable message", "client", client.ID, "error", err)
 		s.Stats.MessagesDropped.Add(1)
 		return
 	}
+	s.storePutOutbound(client.ID, stored)
 	if send != nil {
 		target.enqueue(send)
 	}

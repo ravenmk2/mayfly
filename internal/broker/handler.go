@@ -9,6 +9,7 @@ import (
 	"github.com/ravenmk2/mayfly/internal/hook"
 	"github.com/ravenmk2/mayfly/internal/packet"
 	"github.com/ravenmk2/mayfly/internal/session"
+	"github.com/ravenmk2/mayfly/internal/store"
 	"github.com/ravenmk2/mayfly/internal/topics"
 )
 
@@ -23,25 +24,39 @@ func (c *conn) processPacket(pk *packet.Packet) error {
 	case packet.Publish:
 		return s.publishFrom(c, pk)
 	case packet.Puback:
-		if next := c.sessionClient().ReceivePuback(pk.PacketID); next != nil {
+		cl := c.sessionClient()
+		if next := cl.ReceivePuback(pk.PacketID); next != nil {
 			c.enqueue(next)
+			s.storePutPromoted(cl, next.PacketID)
 		}
+		s.storeDeleteInflight(cl.ID, store.Outbound, pk.PacketID)
 	case packet.Pubrec:
-		pubrel, err := c.sessionClient().ReceivePubrec(pk.PacketID)
+		cl := c.sessionClient()
+		pubrel, err := cl.ReceivePubrec(pk.PacketID)
 		if err != nil {
 			return err
 		}
 		c.enqueue(&pubrel)
+		// The QoS 2 handshake advanced to the PUBREL stage: persist the
+		// transition so a crash does not resurrect the PUBLISH stage.
+		if msg, ok := cl.OutboundMessage(pk.PacketID); ok {
+			s.storePutOutbound(cl.ID, &msg)
+		}
 	case packet.Pubrel:
-		deliver, ack := c.sessionClient().ReceivePubrel(pk.PacketID)
+		cl := c.sessionClient()
+		deliver, ack := cl.ReceivePubrel(pk.PacketID)
+		s.storeDeleteInflight(cl.ID, store.Inbound, pk.PacketID)
 		if deliver != nil {
 			s.releaseQoS2(c, deliver)
 		}
 		c.enqueue(&ack)
 	case packet.Pubcomp:
-		if next := c.sessionClient().ReceivePubcomp(pk.PacketID); next != nil {
+		cl := c.sessionClient()
+		if next := cl.ReceivePubcomp(pk.PacketID); next != nil {
 			c.enqueue(next)
+			s.storePutPromoted(cl, next.PacketID)
 		}
+		s.storeDeleteInflight(cl.ID, store.Outbound, pk.PacketID)
 	case packet.Subscribe:
 		return c.onSubscribe(pk)
 	case packet.Unsubscribe:
@@ -82,6 +97,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 		ReceiveMaximum:    s.opts.ReceiveMaximum,
 		TopicAliasMaximum: s.opts.TopicAliasMaximum,
 	})
+	client.MarkCreated(s.now())
 	c.mu.Lock()
 	c.version = client.ProtocolVersion
 	c.mu.Unlock()
@@ -142,6 +158,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 
 	// Session takeover and resume.
 	var endedWill *session.Will // old session ends on a clean takeover
+	cleanTakeover := false
 	s.mu.Lock()
 	old := s.clients[client.ID]
 	existed := false
@@ -163,6 +180,7 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 				s.wills.Cancel(client.ID)
 				endedWill = oldClient.Will
 				s.removeSubscriptionsLocked(oldClient)
+				cleanTakeover = true
 			} else {
 				// The session continues: a pending delayed Will is
 				// cancelled and durable state migrates [MQTT-3.1.2-4].
@@ -173,6 +191,13 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 	}
 	s.clients[client.ID] = c
 	s.mu.Unlock()
+
+	if cleanTakeover {
+		// Purge the ended session's persisted subscriptions and inflight
+		// before the fresh session row replaces it.
+		s.storeDeleteSessionState(client.ID)
+	}
+	s.storePutSession(client)
 
 	if endedWill != nil {
 		s.publishWill(client.ID, endedWill)
@@ -221,6 +246,13 @@ func (c *conn) onConnect(pk *packet.Packet) error {
 			r := resend
 			c.enqueue(&r)
 		}
+	}
+	// Messages queued behind the Receive Maximum window — the offline queue
+	// included — fill the free slots now.
+	for _, p := range client.PromoteQueued() {
+		promoted := p
+		c.enqueue(&promoted)
+		s.storePutPromoted(client, promoted.PacketID)
 	}
 	s.log.Debug("client connected", "client", client.ID, "version", client.ProtocolVersion,
 		"sessionPresent", connack.SessionPresent)
@@ -292,6 +324,7 @@ func (c *conn) onSubscribe(pk *packet.Packet) error {
 			continue
 		}
 		client.AddSubscription(sub)
+		s.storePutSubscription(client.ID, sub)
 		codes = append(codes, f.Qos) // granted QoS equals the numeric reason code
 		granted = append(granted, grantedSub{sub: sub, existed: existed})
 	}
@@ -328,6 +361,7 @@ func (c *conn) onUnsubscribe(pk *packet.Packet) error {
 		if err := s.topics.Unsubscribe(client.ID, f.Filter); err != nil {
 			return packet.Code{Code: packet.CodeTopicFilterInvalid, Reason: err.Error()}
 		}
+		s.storeDeleteSubscription(client.ID, f.Filter)
 		removed := false
 		for _, sub := range client.Subscriptions() {
 			if fullFilter(sub) == f.Filter {
@@ -401,6 +435,7 @@ func (c *conn) cleanup() {
 		publishWill := session.WillOnDisconnect(receivedDisconnect, reason) &&
 			client.Will != nil && !client.TakenOver() && !c.suppressWill.Load()
 
+		sessionEnded, sessionStopped := false, false
 		s.mu.Lock()
 		if s.clients[client.ID] == c && !client.TakenOver() {
 			if client.Expiry() == 0 {
@@ -408,12 +443,21 @@ func (c *conn) cleanup() {
 				// [MQTT-3.1.2-11].
 				delete(s.clients, client.ID)
 				s.removeSubscriptionsLocked(client)
+				sessionEnded = true
 			} else {
 				client.MarkStopped(s.now())
 				s.scheduleSessionExpiryLocked(client)
+				sessionStopped = true
 			}
 		}
 		s.mu.Unlock()
+
+		switch {
+		case sessionEnded:
+			s.storeDeleteSessionState(client.ID)
+		case sessionStopped:
+			s.storePutSession(client)
+		}
 
 		if publishWill {
 			s.arrangeWill(client)
@@ -448,9 +492,7 @@ func (s *Server) arrangeWill(client *session.Client) {
 func (s *Server) publishWill(clientID string, will *session.Will) {
 	pk := willPacket(will, s.now())
 	if will.Retain {
-		if err := s.topics.Retain(pk); err != nil {
-			s.log.Warn("retaining will failed", "client", clientID, "error", err)
-		}
+		s.retain(pk)
 	}
 	s.deliver(nil, &pk, s.now())
 	s.log.Debug("will published", "client", clientID, "topic", will.Topic)
@@ -459,9 +501,7 @@ func (s *Server) publishWill(clientID string, will *session.Will) {
 // fireWill injects a scheduled Will whose delay elapsed.
 func (s *Server) fireWill(pk *packet.Packet) {
 	if pk.FixedHeader.Retain {
-		if err := s.topics.Retain(*pk); err != nil {
-			s.log.Warn("retaining will failed", "topic", pk.TopicName, "error", err)
-		}
+		s.retain(*pk)
 	}
 	s.deliver(nil, pk, s.now())
 }

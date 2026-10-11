@@ -18,6 +18,7 @@ import (
 	"github.com/ravenmk2/mayfly/internal/listener"
 	"github.com/ravenmk2/mayfly/internal/packet"
 	"github.com/ravenmk2/mayfly/internal/session"
+	"github.com/ravenmk2/mayfly/internal/store"
 	"github.com/ravenmk2/mayfly/internal/topics"
 )
 
@@ -76,6 +77,12 @@ type Options struct {
 	// Authorizer is the authorization chain; nil selects the allow-all
 	// stub.
 	Authorizer hook.Gate
+	// Store persists sessions, subscriptions, inflight messages and retained
+	// messages (docs/design/persistence.md); nil runs memory-only. Wrap the
+	// store in a store.BatchWriter for asynchronous batched writes. When set,
+	// New synchronously recovers the persisted state before any listener
+	// accepts connections.
+	Store store.Store
 	// Logger receives broker log records; nil selects slog.Default().
 	Logger *slog.Logger
 }
@@ -163,6 +170,7 @@ type Server struct {
 	authn  hook.Authenticator
 	authz  hook.Gate
 	wills  session.WillScheduler
+	store  store.Store
 
 	// Stats groups the exported counters.
 	Stats Stats
@@ -182,19 +190,29 @@ type Server struct {
 	now func() time.Time
 }
 
-// New builds a Server with normalized options.
+// New builds a Server with normalized options. When a Store is configured
+// the persisted state is recovered synchronously, so sessions, subscriptions,
+// inflight messages and retained messages are complete before the first
+// listener accepts a connection.
 func New(opts Options) *Server {
 	opts.normalize()
-	return &Server{
+	s := &Server{
 		opts:    opts,
 		log:     opts.Logger,
 		topics:  topics.New(),
 		authn:   opts.Authenticator,
 		authz:   opts.Authorizer,
+		store:   opts.Store,
 		clients: make(map[string]*conn),
 		runDone: make(chan struct{}),
 		now:     time.Now,
 	}
+	if s.store != nil {
+		s.recoverStore()
+	} else {
+		s.log.Info("no store configured; session state is memory-only and lost on restart")
+	}
+	return s
 }
 
 // AddListener registers a listener to be served by Run.
@@ -351,8 +369,12 @@ func (s *Server) sweep(now time.Time) {
 		if cl == nil {
 			continue
 		}
-		cl.DropExpiredOutbound(now)
-		cl.DropExpiredInbound(now)
+		for _, msg := range cl.DropExpiredOutbound(now) {
+			s.storeDeleteInflight(cl.ID, store.Outbound, msg.Packet.PacketID)
+		}
+		for _, pk := range cl.DropExpiredInbound(now) {
+			s.storeDeleteInflight(cl.ID, store.Inbound, pk.PacketID)
+		}
 	}
 
 	for {
@@ -380,6 +402,7 @@ func (s *Server) sweep(now time.Time) {
 		s.mu.Unlock()
 		c.suppressWill.Store(true)
 		c.stop()
+		s.storeDeleteSessionState(item.clientID)
 		s.log.Debug("session expired", "client", item.clientID)
 	}
 }
