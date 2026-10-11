@@ -10,12 +10,9 @@ import (
 	"github.com/ravenmk2/mayfly/internal/topics"
 )
 
-// publishFrom handles the broker side of an inbound PUBLISH after the QoS
-// state machine accepted it: topic alias resolution, authorization, retained
-// storage and fan-out. It is called for QoS 0/1 directly from the read loop
-// and for QoS 2 when the PUBREL completes the handshake (strict
-// exactly-once, [MQTT-4.3.3-1]). A returned error is fatal to the
-// connection.
+// publishFrom handles an inbound PUBLISH from the read loop: topic alias
+// resolution, authorization, the QoS handshake and, when the message becomes
+// deliverable, routing. A returned error is fatal to the connection.
 func (s *Server) publishFrom(c *conn, pk *packet.Packet) error {
 	client := c.sessionClient()
 	now := s.now()
@@ -52,13 +49,7 @@ func (s *Server) publishFrom(c *conn, pk *packet.Packet) error {
 
 	matched := false
 	if deliver != nil {
-		s.Stats.MessagesReceived.Add(1)
-		if deliver.FixedHeader.Retain {
-			if err := s.topics.Retain(*deliver); err != nil {
-				s.log.Warn("retain failed", "topic", deliver.TopicName, "error", err)
-			}
-		}
-		matched = s.deliver(c, deliver, now)
+		matched = s.route(c, deliver, now)
 	}
 
 	if ack != nil {
@@ -71,6 +62,25 @@ func (s *Server) publishFrom(c *conn, pk *packet.Packet) error {
 		c.enqueue(ack)
 	}
 	return nil
+}
+
+// releaseQoS2 routes an inbound QoS 2 message whose PUBREL completed the
+// handshake (strict exactly-once, [MQTT-4.3.3-1]). The alias, authorization
+// and expiry were handled when the PUBLISH arrived.
+func (s *Server) releaseQoS2(c *conn, pk *packet.Packet) {
+	s.route(c, pk, s.now())
+}
+
+// route stores a deliverable message when retained and fans it out,
+// reporting whether any subscription matched.
+func (s *Server) route(sender *conn, pk *packet.Packet, now time.Time) (matched bool) {
+	s.Stats.MessagesReceived.Add(1)
+	if pk.FixedHeader.Retain {
+		if err := s.topics.Retain(*pk); err != nil {
+			s.log.Warn("retain failed", "topic", pk.TopicName, "error", err)
+		}
+	}
+	return s.deliver(sender, pk, now)
 }
 
 // ackDeniedPublish completes the QoS handshake of an unauthorized PUBLISH
@@ -125,19 +135,21 @@ func (s *Server) deliver(sender *conn, pk *packet.Packet, now time.Time) (matche
 			target.sessionClient().TakenOver() {
 			continue // offline; shared-group selection lands elsewhere next time
 		}
-		s.deliverTo(target, sub, pk, now)
+		s.deliverTo(target, sub, pk, now, false)
 	}
 	return matched
 }
 
 // deliverTo builds the per-subscriber PUBLISH and hands it to the session
-// inflight window; the returned packet is queued on the connection.
-func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Packet, now time.Time) {
+// inflight window; the returned packet is queued on the connection. replay
+// marks subscribe-time retained delivery, where the RETAIN flag produced by
+// topics.Messages ([MQTT-3.3.1-9]) is kept as is.
+func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Packet, now time.Time, replay bool) {
 	client := target.sessionClient()
 	if client == nil {
 		return
 	}
-	out := buildDelivery(client, sub, pk, now)
+	out := buildDelivery(client, sub, pk, now, replay)
 	if out == nil {
 		s.Stats.MessagesDropped.Add(1)
 		return // expired or otherwise undeliverable
@@ -159,14 +171,17 @@ func (s *Server) deliverTo(target *conn, sub topics.Subscription, pk *packet.Pac
 // forwarding with the Message Expiry rewritten to the remaining seconds
 // [MQTT-3.3.2-5], Subscription Identifiers [MQTT-3.3.4-6] and the outbound
 // Topic Alias. nil means the message must not be delivered (expired).
-func buildDelivery(client *session.Client, sub topics.Subscription, pk *packet.Packet, now time.Time) *packet.Packet {
+// replay marks subscribe-time retained delivery, which keeps the RETAIN
+// flag topics.Messages computed.
+func buildDelivery(client *session.Client, sub topics.Subscription, pk *packet.Packet, now time.Time, replay bool) *packet.Packet {
 	if !pk.Expiry.IsZero() && !now.Before(pk.Expiry) {
 		return nil
 	}
 	out := &packet.Packet{
 		FixedHeader: packet.FixedHeader{
-			Type: packet.Publish,
-			Qos:  session.DowngradeQoS(pk.FixedHeader.Qos, sub.Qos),
+			Type:   packet.Publish,
+			Qos:    session.DowngradeQoS(pk.FixedHeader.Qos, sub.Qos),
+			Retain: pk.FixedHeader.Retain,
 		},
 		TopicName:       pk.TopicName,
 		Payload:         pk.Payload,
@@ -174,11 +189,12 @@ func buildDelivery(client *session.Client, sub topics.Subscription, pk *packet.P
 		Created:         pk.Created,
 		ProtocolVersion: client.ProtocolVersion,
 	}
-	// RetainAsPublished controls whether the retain flag passes through;
-	// without it (and for every MQTT 3.1.1 delivery) the flag is cleared
-	// [MQTT-3.3.1-9].
-	if sub.RetainAsPublished {
-		out.FixedHeader.Retain = pk.FixedHeader.Retain
+	// Live delivery: RetainAsPublished controls whether the retain flag
+	// passes through; without it (and for every MQTT 3.1.1 delivery) the
+	// flag is cleared [MQTT-3.3.1-9]. Retained replays keep the flag that
+	// topics.Messages already computed.
+	if !replay && !sub.RetainAsPublished {
+		out.FixedHeader.Retain = false
 	}
 	if client.ProtocolVersion != packet.Version5 {
 		return out

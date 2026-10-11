@@ -100,7 +100,7 @@ type ClientInfo struct {
 	ClientID string
 	Username string
 	// Superuser clients skip the authorization chain entirely.
-	Superuser bool
+	Superuser  bool
 	RemoteAddr string
 	ListenerID string
 }

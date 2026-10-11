@@ -35,9 +35,7 @@ func (c *conn) processPacket(pk *packet.Packet) error {
 	case packet.Pubrel:
 		deliver, ack := c.sessionClient().ReceivePubrel(pk.PacketID)
 		if deliver != nil {
-			if err := s.publishFrom(c, deliver); err != nil {
-				return err
-			}
+			s.releaseQoS2(c, deliver)
 		}
 		c.enqueue(&ack)
 	case packet.Pubcomp:
@@ -290,7 +288,7 @@ func (c *conn) onSubscribe(pk *packet.Packet) error {
 	for _, g := range granted {
 		for _, retained := range s.topics.Messages(g.sub, g.existed) {
 			m := retained
-			s.deliverTo(c, g.sub, &m, now)
+			s.deliverTo(c, g.sub, &m, now, true)
 		}
 	}
 	return nil

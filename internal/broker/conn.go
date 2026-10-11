@@ -31,8 +31,9 @@ type conn struct {
 	// preserved (architecture decision A2).
 	queue chan *packet.Packet
 
-	done      chan struct{} // closed by stop
-	stopOnce  sync.Once
+	done        chan struct{} // closed by stop
+	stopOnce    sync.Once
+	closeNet    sync.Once
 	cleanupOnce sync.Once
 
 	// suppressWill marks connections whose Will is handled elsewhere
@@ -89,10 +90,18 @@ func (c *conn) protocolVersion() byte {
 	return c.version
 }
 
-// stop closes the connection exactly once, terminating both goroutines.
+// stop signals termination exactly once. The socket itself is closed by the
+// write loop after it drains the queue, so final control packets (CONNACK
+// rejections, protocol error DISCONNECTs) still reach the peer.
 func (c *conn) stop() {
 	c.stopOnce.Do(func() {
 		close(c.done)
+	})
+}
+
+// closeSocket closes the network connection exactly once.
+func (c *conn) closeSocket() {
+	c.closeNet.Do(func() {
 		_ = c.nc.Close()
 	})
 }
@@ -120,7 +129,14 @@ func (c *conn) readLoop() {
 		c.setReadDeadline()
 		pk, err := c.readPacket(br)
 		if err != nil {
-			c.abortOnReadError(err)
+			// Codec violations are protocol errors the v5 client is
+			// notified about; I/O failures are handled quietly.
+			var code packet.Code
+			if errors.As(err, &code) {
+				c.fail(code)
+			} else {
+				c.abortOnReadError(err)
+			}
 			return
 		}
 		if c.sessionClient() == nil && pk.FixedHeader.Type != packet.Connect {
@@ -247,6 +263,7 @@ func (c *conn) fail(err error) {
 // packets for up to FlushInterval and flushes (architecture decision A2).
 func (c *conn) writeLoop() {
 	defer c.server.wg.Done()
+	defer c.closeSocket()
 	defer c.stop()
 
 	w := bufio.NewWriterSize(c.nc, c.server.opts.ReadBufferSize)

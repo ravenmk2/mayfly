@@ -90,6 +90,9 @@ func (o *Options) normalize() {
 	if o.ReceiveMaximum == 0 {
 		o.ReceiveMaximum = DefaultReceiveMaximum
 	}
+	if o.TopicAliasMaximum == 0 {
+		o.TopicAliasMaximum = DefaultTopicAliasMaximum
+	}
 	if o.ReadBufferSize <= 0 {
 		o.ReadBufferSize = DefaultReadBufferSize
 	}
