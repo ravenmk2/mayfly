@@ -126,7 +126,7 @@ async function wizFinish() {
     const dsn = wiz.db === 'mysql' ? mysqlDsn() : '';
     await setup(wiz.db, dsn, wiz.pass1);
     auth.markInitialized();
-    ElMessage.success('初始化完成:配置已写入 ./data,MQTT 监听器需重启进程后启动');
+    ElMessage.success('初始化完成:配置已写入 ./data,MQTT 监听器已启动');
     router.push({ name: 'login' });
   } catch (e) {
     if (e.status === 410) {

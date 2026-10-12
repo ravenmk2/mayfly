@@ -56,8 +56,8 @@ export const listRetained = (params) => api.get('/retained', params);
 export const deleteRetained = (topic) => api.del('/retained', { topic });
 
 // ---------- 测试发布 ----------
-export const publish = (topic, payload, payloadEncoding, retain) =>
-  api.post('/publish', { topic, payload, payload_encoding: payloadEncoding, retain, qos: 0 });
+export const publish = (topic, payload, payloadEncoding, retain, qos = 0) =>
+  api.post('/publish', { topic, payload, payload_encoding: payloadEncoding, retain, qos });
 
 // ---------- MQTT 用户 / ACL ----------
 export const listUsers = (params) => api.get('/users', params);
