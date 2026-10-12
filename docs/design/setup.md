@@ -36,7 +36,7 @@
 
 ## 5. 非交互初始化(自动化部署)
 
-环境变量直通:`MAYFLY_SETUP_DB=sqlite|mysql`、`MAYFLY_SETUP_ADMIN_PASSWORD=...`、`MAYFLY_SETUP_MYSQL_DSN=...` 齐全时跳过向导直接初始化(主密钥自动生成),便于容器/脚本化部署。
+环境变量直通:`MAYFLY_SETUP_DB=sqlite|mysql`、`MAYFLY_SETUP_ADMIN_PASSWORD=...`、`MAYFLY_SETUP_MYSQL_DSN=...` 齐全时跳过向导直接初始化(主密钥自动生成),便于容器/脚本化部署。`MAYFLY_SETUP_LISTEN_ADDR` 可覆盖生成配置中的 TCP 监听地址(默认 `:1883`)。
 
 ## 6. API
 
@@ -44,4 +44,6 @@
 | --- | --- | --- |
 | GET | `/api/v1/setup/status` | `{initialized: bool}`;initialized = 配置文件存在且 `admin_user` 非空,未初始化时 Console 据此进向导 |
 | POST | `/api/v1/setup/test-db` | 向导内测试 MySQL 连接(不持久化) |
-| POST | `/api/v1/setup` | 执行初始化(db 选择、admin 密码);已初始化返回 410 Gone。成功响应 `{initialized: true, restart_required: true}`:管理面即刻解锁(签发 JWT 的主密钥已切换为落盘密钥),MQTT 监听器需重启进程后启动 |
+| POST | `/api/v1/setup` | 执行初始化(db 选择、admin 密码);已初始化返回 410 Gone。成功响应 `{initialized: true}`,数据面在进程内即刻热激活:console store 从内存切换到主库(bootstrap admin 迁移)、按新配置构建 auth 链与 store 并挂到 broker、MQTT 监听器启动;激活失败返回 502 `activation_failed`(配置已落盘,重启进程即可生效) |
+
+热激活的并发安全:setup 由服务端串行化(并发提交首个获胜,其余 410);store/链/监听器的挂载全部走 broker 与 admin server 的运行时挂载点(SetStore / SetChains / AddListener / SwapStore / AdoptAuthManager),已初始化的实例不受影响。

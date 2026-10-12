@@ -79,7 +79,7 @@ Mayfly 是轻量级 MQTT Broker，对标主流单机 broker 的核心能力，MQ
 | A8 | hook 用接口分组 + 类型断言,不用大接口 + Provides 枚举 | 编译期安全,无样板 |
 | A9 | 过期清理一律最小堆 | 避免全表扫描 |
 | A10 | 不实现集群/桥接/规则引擎(二期);Router 接口隔离投递引擎 | 轻量定位;规则引擎仅预留消息钩子 |
-| A11 | 首次运行安装向导选主库(SQLite/MySQL)并设 admin 密码、生成主密钥;一切可变数据落 `./data`(相对 cwd) | 开箱即用且零硬编码密钥;详见 design/setup.md |
+| A11 | 首次运行安装向导选主库(SQLite/MySQL)并设 admin 密码、生成主密钥;一切可变数据落 `./data`(相对 cwd);setup 成功后数据面进程内热激活(store/auth 链/监听器运行期挂载),无需重启 | 开箱即用且零硬编码密钥;详见 design/setup.md |
 
 ## 5. 过载保护配额
 

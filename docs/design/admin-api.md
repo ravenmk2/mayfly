@@ -26,7 +26,7 @@
 | DELETE | `/api/v1/retained?topic=<topic>` | 删除指定 retained(topic 含斜杠,故走 query 参数;不存在时幂等 204) |
 | POST | `/api/v1/publish` | 服务端发消息(topic/payload/payload_encoding(utf8\|base64)/qos/retain);内部发布按 min(请求 qos, 订阅 qos) 投递,retain=true 落 retained |
 | GET/POST/PUT/DELETE | `/api/v1/users[/{username}]` | MQTT 用户管理(写操作同步落库并刷新认证缓存) |
-| GET/PUT | `/api/v1/auth/chains` | 认证/授权源链查询与整体更新(顺序、启停、源增删;db 源每链至多一个;GET 中 DSN 密码掩码;PUT 为运行时生效,重启后回到 mayfly.yaml) |
+| GET/PUT | `/api/v1/auth/chains` | 认证/授权源链查询与整体更新(顺序、启停、源增删;db 源每链至多一个;GET 中 DSN 密码掩码为 `***`,PUT 回传掩码时保留该源当前真实 DSN,显式传新 DSN 才变更;PUT 为运行时生效,重启后回到 mayfly.yaml) |
 | GET/POST/PUT/DELETE | `/api/v1/acls[/{id}]` | ACL 规则管理(写后触发编译缓存重建) |
 | POST | `/api/v1/auth/refresh` | 手动刷新认证/ACL 缓存 |
 | GET/POST/DELETE | `/api/v1/apikeys[/{id}]` | API Key 管理(仅 admin scope;创建响应一次性返回完整 key,列表只给 prefix) |
