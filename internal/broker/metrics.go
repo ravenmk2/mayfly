@@ -9,17 +9,29 @@ import (
 	"github.com/ravenmk2/mayfly/internal/topics"
 )
 
-// Publish injects a broker-originated message into the normal retain and
-// delivery path; the $SYS publisher and the admin REST API publish through
-// it. The QoS is 0 and internal traffic does not count towards the client
-// message counters.
+// Publish injects a broker-originated QoS 0 message into the retain and
+// delivery path; the $SYS publisher goes through it. Internal traffic does
+// not count towards the client message counters.
 func (s *Server) Publish(topic string, payload []byte, retain bool) error {
+	return s.PublishQoS(topic, payload, 0, retain)
+}
+
+// PublishQoS injects a broker-originated message with the requested QoS into
+// the normal retain and delivery path (the admin REST API publishes through
+// it). Each matching subscription receives the message at
+// min(qos, subscription qos) [MQTT-3.8.4-3]; the QoS 1/2 acknowledgement
+// handshake runs on the subscriber side like any routed publication.
+// Internal traffic does not count towards the client message counters.
+func (s *Server) PublishQoS(topic string, payload []byte, qos byte, retain bool) error {
 	if !topics.IsValidTopicName(topic) {
 		return fmt.Errorf("broker: invalid topic name %q", topic)
 	}
+	if qos > 2 {
+		return fmt.Errorf("broker: invalid qos %d", qos)
+	}
 	now := s.now()
 	pk := packet.Packet{
-		FixedHeader: packet.FixedHeader{Type: packet.Publish, Retain: retain},
+		FixedHeader: packet.FixedHeader{Type: packet.Publish, Qos: qos, Retain: retain},
 		TopicName:   topic,
 		Payload:     payload,
 		Created:     now,

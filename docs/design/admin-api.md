@@ -24,7 +24,7 @@
 | GET | `/api/v1/subscriptions` | 分页,按 client_id/filter 子串过滤 |
 | GET | `/api/v1/retained` | 分页,`topic` 子串过滤;payload 仅返回前 256 字节 base64 预览 |
 | DELETE | `/api/v1/retained?topic=<topic>` | 删除指定 retained(topic 含斜杠,故走 query 参数;不存在时幂等 204) |
-| POST | `/api/v1/publish` | 服务端发消息(topic/payload/payload_encoding(utf8\|base64)/retain);内部发布固定 QoS 0 |
+| POST | `/api/v1/publish` | 服务端发消息(topic/payload/payload_encoding(utf8\|base64)/qos/retain);内部发布按 min(请求 qos, 订阅 qos) 投递,retain=true 落 retained |
 | GET/POST/PUT/DELETE | `/api/v1/users[/{username}]` | MQTT 用户管理(写操作同步落库并刷新认证缓存) |
 | GET/PUT | `/api/v1/auth/chains` | 认证/授权源链查询与整体更新(顺序、启停、源增删;db 源每链至多一个;GET 中 DSN 密码掩码;PUT 为运行时生效,重启后回到 mayfly.yaml) |
 | GET/POST/PUT/DELETE | `/api/v1/acls[/{id}]` | ACL 规则管理(写后触发编译缓存重建) |

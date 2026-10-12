@@ -252,15 +252,16 @@ func (s *Server) deleteRetained(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// publishRequest is the POST /api/v1/publish body. Internal publishes are
-// QoS 0 (broker.Server.Publish).
+// publishRequest is the POST /api/v1/publish body.
 type publishRequest struct {
 	Topic   string `json:"topic"`
 	Payload string `json:"payload"`
 	// PayloadEncoding is "utf8" (default) or "base64".
 	PayloadEncoding string `json:"payload_encoding"`
-	Qos             byte   `json:"qos"`
-	Retain          bool   `json:"retain"`
+	// Qos is the requested QoS (0-2); each subscription receives the message
+	// at min(qos, subscription qos).
+	Qos    byte `json:"qos"`
+	Retain bool `json:"retain"`
 }
 
 // publish injects a server-side message (docs/design/admin-api.md section 3).
@@ -272,8 +273,8 @@ func (s *Server) publish(c echo.Context) error {
 	if req.Topic == "" {
 		return abort(c, http.StatusBadRequest, "bad_request", "topic is required")
 	}
-	if req.Qos != 0 {
-		return abort(c, http.StatusBadRequest, "bad_request", "internal publishes are QoS 0")
+	if req.Qos > 2 {
+		return abort(c, http.StatusBadRequest, "bad_request", "qos must be 0, 1 or 2")
 	}
 	payload := []byte(req.Payload)
 	switch req.PayloadEncoding {
@@ -287,9 +288,10 @@ func (s *Server) publish(c echo.Context) error {
 	default:
 		return abort(c, http.StatusBadRequest, "bad_request", "payload_encoding must be utf8 or base64")
 	}
-	if err := s.broker.Publish(req.Topic, payload, req.Retain); err != nil {
+	if err := s.broker.PublishQoS(req.Topic, payload, req.Qos, req.Retain); err != nil {
 		return abort(c, http.StatusBadRequest, "bad_request", err.Error())
 	}
-	s.log.Info("message published via api", "topic", req.Topic, "bytes", len(payload), "retain", req.Retain)
+	s.log.Info("message published via api", "topic", req.Topic, "bytes", len(payload),
+		"qos", req.Qos, "retain", req.Retain)
 	return c.JSON(http.StatusAccepted, map[string]bool{"ok": true})
 }

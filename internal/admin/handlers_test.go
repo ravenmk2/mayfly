@@ -102,13 +102,41 @@ func mqttConnect(t *testing.T, b *broker.Server, connID, clientID string) net.Co
 // mqttSubscribe subscribes one filter at QoS 0.
 func mqttSubscribe(t *testing.T, c net.Conn, packetID uint16, filter string) {
 	t.Helper()
+	mqttSubscribeQoS(t, c, packetID, filter, 0)
+}
+
+// mqttSubscribeQoS subscribes one filter at the given QoS.
+func mqttSubscribeQoS(t *testing.T, c net.Conn, packetID uint16, filter string, qos byte) {
+	t.Helper()
 	writePacket(t, c, &packet.Packet{
 		FixedHeader: packet.FixedHeader{Type: packet.Subscribe, Qos: 1},
 		PacketID:    packetID,
-		Filters:     []packet.Subscription{{Filter: filter}},
+		Filters:     []packet.Subscription{{Filter: filter, Qos: qos}},
 	})
 	ack := readFrame(t, c)
 	require.Equal(t, byte(0x90), ack[0], "expected SUBACK")
+}
+
+// readPublish reads one PUBLISH frame and completes its QoS handshake.
+func readPublish(t *testing.T, c net.Conn) *packet.Packet {
+	t.Helper()
+	frame := readFrame(t, c)
+	pk := &packet.Packet{ProtocolVersion: packet.Version311}
+	require.NoError(t, pk.Decode(frame))
+	require.Equal(t, packet.Publish, pk.FixedHeader.Type)
+	switch pk.FixedHeader.Qos {
+	case 1:
+		writePacket(t, c, &packet.Packet{
+			FixedHeader: packet.FixedHeader{Type: packet.Puback}, PacketID: pk.PacketID})
+	case 2:
+		writePacket(t, c, &packet.Packet{
+			FixedHeader: packet.FixedHeader{Type: packet.Pubrec}, PacketID: pk.PacketID})
+		rel := readFrame(t, c)
+		require.Equal(t, byte(0x62), rel[0], "expected PUBREL")
+		writePacket(t, c, &packet.Packet{
+			FixedHeader: packet.FixedHeader{Type: packet.Pubcomp}, PacketID: pk.PacketID})
+	}
+	return pk
 }
 
 func TestStatus(t *testing.T) {
@@ -266,12 +294,69 @@ func TestPublishEndpoint(t *testing.T) {
 	// Validation.
 	code, _ = do(t, e, http.MethodPost, "/api/v1/publish", map[string]any{"topic": "", "payload": "x"}, auth)
 	assert.Equal(t, http.StatusBadRequest, code)
-	code, _ = do(t, e, http.MethodPost, "/api/v1/publish", map[string]any{"topic": "a/b", "payload": "x", "qos": 1}, auth)
+	code, _ = do(t, e, http.MethodPost, "/api/v1/publish", map[string]any{"topic": "a/b", "payload": "x", "qos": 3}, auth)
 	assert.Equal(t, http.StatusBadRequest, code)
 	code, _ = do(t, e, http.MethodPost, "/api/v1/publish", map[string]any{"topic": "a/b", "payload": "!!", "payload_encoding": "base64"}, auth)
 	assert.Equal(t, http.StatusBadRequest, code)
 	code, _ = do(t, e, http.MethodPost, "/api/v1/publish", map[string]any{"topic": "bad/#", "payload": "x"}, auth)
 	assert.Equal(t, http.StatusBadRequest, code)
+}
+
+// TestPublishEndpointQoS drives the three QoS levels and the retain flag
+// through POST /api/v1/publish; the subscriber receives each message at
+// min(request qos, subscription qos).
+func TestPublishEndpointQoS(t *testing.T) {
+	s, e, b := testFullAPI(t)
+	seedUser(t, s, "admin", "s3cret")
+	auth := bearer(loginToken(t, e, "admin", "s3cret"))
+
+	cli := mqttConnect(t, b, "t-1", "dev-qos")
+	mqttSubscribeQoS(t, cli, 1, "qos/#", 2)
+
+	tests := []struct {
+		name    string
+		qos     byte
+		wantQos byte
+	}{
+		{"qos 0", 0, 0},
+		{"qos 1", 1, 1},
+		{"qos 2", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, body := do(t, e, http.MethodPost, "/api/v1/publish",
+				map[string]any{"topic": "qos/test", "payload": "hi", "qos": tt.qos}, auth)
+			require.Equal(t, http.StatusAccepted, code, "body: %v", body)
+			pk := readPublish(t, cli)
+			assert.Equal(t, tt.wantQos, pk.FixedHeader.Qos)
+			assert.Equal(t, []byte("hi"), pk.Payload)
+		})
+	}
+
+	// The subscription caps the delivered QoS at its own level.
+	mqttSubscribeQoS(t, cli, 2, "capped/test", 0)
+	code, body := do(t, e, http.MethodPost, "/api/v1/publish",
+		map[string]any{"topic": "capped/test", "payload": "hi", "qos": 2}, auth)
+	require.Equal(t, http.StatusAccepted, code, "body: %v", body)
+	pk := readPublish(t, cli)
+	assert.Equal(t, byte(0), pk.FixedHeader.Qos, "deliver at min(request qos, subscription qos)")
+
+	// A retained internal publish lands in the retained store and replays to
+	// a new subscriber with the RETAIN flag set.
+	code, body = do(t, e, http.MethodPost, "/api/v1/publish",
+		map[string]any{"topic": "qos/retained", "payload": "cmV0YWluZWQ=", "payload_encoding": "base64",
+			"qos": 1, "retain": true}, auth)
+	require.Equal(t, http.StatusAccepted, code, "body: %v", body)
+	// The live subscriber receives it with RETAIN cleared (live delivery).
+	pk = readPublish(t, cli)
+	assert.False(t, pk.FixedHeader.Retain)
+
+	cli2 := mqttConnect(t, b, "t-2", "dev-late")
+	mqttSubscribeQoS(t, cli2, 1, "qos/retained", 2)
+	pk = readPublish(t, cli2)
+	assert.True(t, pk.FixedHeader.Retain, "retained replay keeps the RETAIN flag")
+	assert.Equal(t, byte(1), pk.FixedHeader.Qos, "retained replay at min(published qos, subscription qos)")
+	assert.Equal(t, []byte("retained"), pk.Payload)
 }
 
 func TestUsersCRUD(t *testing.T) {
