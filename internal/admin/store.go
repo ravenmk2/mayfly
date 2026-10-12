@@ -6,8 +6,11 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -184,6 +187,7 @@ func (s *MemoryStore) ListUsers(context.Context) ([]User, error) {
 	for name, u := range s.users {
 		out = append(out, User{Username: name, CreatedAt: u.createdAt})
 	}
+	slices.SortFunc(out, func(a, b User) int { return strings.Compare(a.Username, b.Username) })
 	return out, nil
 }
 
@@ -220,6 +224,7 @@ func (s *MemoryStore) ListAPIKeys(context.Context) ([]APIKey, error) {
 	for _, k := range s.keys {
 		out = append(out, k)
 	}
+	slices.SortFunc(out, func(a, b APIKey) int { return cmp.Compare(a.ID, b.ID) })
 	return out, nil
 }
 

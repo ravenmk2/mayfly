@@ -38,6 +38,11 @@ type Options struct {
 	// ApplyChains swaps the broker's authenticator/authorizer to a rebuilt
 	// manager (PUT /api/v1/auth/chains); nil disables chain updates.
 	ApplyChains func(m *auth.Manager)
+	// Activate hot-loads the data plane after a successful setup wizard run
+	// (store, auth chains, MQTT listeners; docs/design/setup.md section 6);
+	// nil keeps the restart-required behavior of reporting success without
+	// activating.
+	Activate func(ctx context.Context) error
 	// DataDir is the data directory (master key, generated config).
 	DataDir string
 	// ConfigPath is where the setup wizard writes mayfly.yaml.
@@ -48,18 +53,19 @@ type Options struct {
 // routes with RegisterRoutes on the console echo instance.
 type Server struct {
 	log        *slog.Logger
-	store      Store
 	version    string
 	broker     *broker.Server
 	apply      func(m *auth.Manager)
+	activate   func(ctx context.Context) error
 	dataDir    string
 	configPath string
 
-	// mu guards masterKey, authMgr and initialized: the setup wizard and the
-	// chain endpoints replace them at runtime.
+	// mu guards masterKey, authMgr, store and initialized: the setup wizard
+	// and the chain endpoints replace them at runtime.
 	mu          sync.RWMutex
 	masterKey   []byte
 	authMgr     *auth.Manager
+	store       Store
 	initialized bool
 
 	// setupMu serializes concurrent wizard submissions.
@@ -90,14 +96,15 @@ func NewServer(opts Options) *Server {
 	}
 	s := &Server{
 		log:         logger,
-		store:       opts.Store,
 		version:     opts.Version,
 		broker:      opts.Broker,
 		apply:       opts.ApplyChains,
+		activate:    opts.Activate,
 		dataDir:     dataDir,
 		configPath:  configPath,
 		masterKey:   opts.MasterKey,
 		authMgr:     opts.AuthManager,
+		store:       opts.Store,
 		initialized: opts.Initialized,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -112,13 +119,14 @@ func (s *Server) Close() error {
 	s.cancel()
 	s.mu.RLock()
 	mgr := s.authMgr
+	st := s.store
 	s.mu.RUnlock()
 	var err error
 	if mgr != nil {
 		err = mgr.Close()
 	}
-	if s.store != nil {
-		if cerr := s.store.Close(); cerr != nil && err == nil {
+	if st != nil {
+		if cerr := st.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
 	}
@@ -195,6 +203,72 @@ func (s *Server) currentAuthManager() *auth.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.authMgr
+}
+
+// currentStore returns the active console store.
+func (s *Server) currentStore() Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.store
+}
+
+// SwapStore replaces the console store at runtime (setup activation switches
+// the memory store for the primary database). Console users missing from the
+// new store are migrated with their password hashes so the bootstrap admin
+// keeps working; the old store is closed afterwards.
+func (s *Server) SwapStore(ctx context.Context, st Store) error {
+	if st == nil {
+		return errors.New("admin: cannot swap in a nil store")
+	}
+	s.mu.Lock()
+	old := s.store
+	s.store = st
+	s.mu.Unlock()
+	if old == nil || old == st {
+		return nil
+	}
+	users, err := old.ListUsers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
+		if _, err := st.UserHash(ctx, u.Username); errors.Is(err, ErrNotFound) {
+			hash, err := old.UserHash(ctx, u.Username)
+			if err != nil {
+				return err
+			}
+			if err := st.CreateUser(ctx, u.Username, hash); err != nil && !errors.Is(err, ErrExists) {
+				return err
+			}
+		}
+	}
+	if err := old.Close(); err != nil {
+		s.log.Warn("closing the replaced console store failed", "error", err)
+	}
+	return nil
+}
+
+// AdoptAuthManager installs a chain manager built outside the chain
+// endpoints (setup activation): its background refresh starts on the server
+// context, the broker chains swap to it and the replaced manager closes. A
+// nil manager is ignored.
+func (s *Server) AdoptAuthManager(mgr *auth.Manager) {
+	if mgr == nil {
+		return
+	}
+	if s.apply != nil {
+		s.apply(mgr)
+	}
+	mgr.Start(s.ctx)
+	s.mu.Lock()
+	old := s.authMgr
+	s.authMgr = mgr
+	s.mu.Unlock()
+	if old != nil {
+		if err := old.Close(); err != nil {
+			s.log.Warn("closing the replaced auth manager failed", "error", err)
+		}
+	}
 }
 
 // abort answers a uniform error body (docs/design/admin-api.md section 3).

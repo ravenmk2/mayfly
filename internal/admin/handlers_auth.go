@@ -556,18 +556,7 @@ func (s *Server) putChains(c echo.Context) error {
 	if err != nil {
 		return abort(c, http.StatusBadRequest, "bad_request", err.Error())
 	}
-	s.apply(mgr)
-	mgr.Start(s.ctx)
-
-	s.mu.Lock()
-	old := s.authMgr
-	s.authMgr = mgr
-	s.mu.Unlock()
-	if old != nil {
-		if err := old.Close(); err != nil {
-			s.log.Warn("closing the replaced auth manager failed", "error", err)
-		}
-	}
+	s.AdoptAuthManager(mgr)
 	s.log.Info("auth chains updated", "sources_authn", len(cfg.Authentication),
 		"sources_authz", len(cfg.Authorization))
 	return s.getChains(c)

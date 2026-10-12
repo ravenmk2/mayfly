@@ -110,7 +110,7 @@ func (s *Server) authenticate(c echo.Context) (principal, error) {
 		return principal{name: sub, scopes: []string{ScopeAdmin}, via: "jwt"}, nil
 	}
 	if key := r.Header.Get("X-API-Key"); key != "" {
-		stored, err := s.store.APIKeyByHash(r.Context(), HashAPIKey(key))
+		stored, err := s.currentStore().APIKeyByHash(r.Context(), HashAPIKey(key))
 		if err != nil {
 			return principal{}, err
 		}

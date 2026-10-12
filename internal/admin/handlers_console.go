@@ -25,7 +25,7 @@ func (s *Server) login(c echo.Context) error {
 	if req.Username == "" || req.Password == "" {
 		return abort(c, http.StatusBadRequest, "bad_request", "username and password are required")
 	}
-	hash, err := s.store.UserHash(c.Request().Context(), req.Username)
+	hash, err := s.currentStore().UserHash(c.Request().Context(), req.Username)
 	if errors.Is(err, ErrNotFound) || (err == nil && !verifyPassword(hash, req.Password)) {
 		return abort(c, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
 	}
@@ -68,7 +68,7 @@ func (s *Server) listAPIKeys(c echo.Context) error {
 	if err != nil {
 		return abort(c, http.StatusBadRequest, "bad_request", err.Error())
 	}
-	keys, err := s.store.ListAPIKeys(c.Request().Context())
+	keys, err := s.currentStore().ListAPIKeys(c.Request().Context())
 	if err != nil {
 		return abort(c, http.StatusInternalServerError, "internal", "listing api keys failed")
 	}
@@ -116,7 +116,7 @@ func (s *Server) createAPIKey(c echo.Context) error {
 	if req.ExpiresInDays > 0 {
 		key.ExpiresAt = key.CreatedAt.Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
 	}
-	id, err := s.store.CreateAPIKey(c.Request().Context(), key)
+	id, err := s.currentStore().CreateAPIKey(c.Request().Context(), key)
 	if err != nil {
 		return abort(c, http.StatusInternalServerError, "internal", "storing api key failed")
 	}
@@ -134,7 +134,7 @@ func (s *Server) deleteAPIKey(c echo.Context) error {
 	if err != nil {
 		return abort(c, http.StatusBadRequest, "bad_request", "invalid api key id")
 	}
-	ok, err := s.store.DeleteAPIKey(c.Request().Context(), id)
+	ok, err := s.currentStore().DeleteAPIKey(c.Request().Context(), id)
 	if err != nil {
 		return abort(c, http.StatusInternalServerError, "internal", "deleting api key failed")
 	}

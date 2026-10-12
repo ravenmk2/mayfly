@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -14,9 +16,20 @@ import (
 
 func TestSetupFlow(t *testing.T) {
 	dir := t.TempDir()
-	s, e := testAPI(t, func(o *Options) {
+	var s *Server
+	var e *echo.Echo
+	s, e = testAPI(t, func(o *Options) {
 		o.Initialized = false
 		o.DataDir = dir
+		// The activation hook swaps the memory console store for the primary
+		// database, like the cmd wiring does (docs/design/setup.md section 6).
+		o.Activate = func(ctx context.Context) error {
+			st, err := OpenSQLStore("sqlite:" + filepath.Join(dir, "mayfly.db"))
+			if err != nil {
+				return err
+			}
+			return s.SwapStore(ctx, st)
+		}
 	})
 
 	// Pre-setup: status reports uninitialized.
@@ -49,7 +62,7 @@ func TestSetupFlow(t *testing.T) {
 		map[string]any{"db": map[string]any{"type": "sqlite"}, "admin_password": "long-enough"}, nil)
 	require.Equal(t, http.StatusCreated, code, "body: %v", body)
 	assert.Equal(t, true, body["initialized"])
-	assert.Equal(t, true, body["restart_required"])
+	assert.NotContains(t, body, "restart_required", "the data plane activates in-process")
 
 	// The master key landed on disk and the in-memory signing key swapped.
 	raw, err := os.ReadFile(filepath.Join(dir, MasterKeyFile))
@@ -87,14 +100,10 @@ func TestSetupFlow(t *testing.T) {
 	assert.Equal(t, http.StatusGone, code)
 	assert.Equal(t, "gone", body["code"])
 
-	// A token signed with the new master key authenticates.
-	code, _ = do(t, e, http.MethodPost, "/api/v1/login",
-		map[string]any{"username": "admin", "password": "long-enough"}, nil)
-	// The memory store of the test server has no admin row; login fails, but
-	// the token path is covered by signing directly.
-	assert.Equal(t, http.StatusUnauthorized, code)
-	token, _, err := signToken(s.currentMasterKey(), "admin", s.now())
-	require.NoError(t, err)
+	// Activation swapped the console store to the primary database: login
+	// works without a restart, and the token authenticates against the key
+	// loaded from disk.
+	token := loginToken(t, e, "admin", "long-enough")
 	code, _ = do(t, e, http.MethodGet, "/api/v1/apikeys", nil, bearer(token))
 	assert.Equal(t, http.StatusOK, code)
 }
