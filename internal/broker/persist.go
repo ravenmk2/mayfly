@@ -19,10 +19,11 @@ import (
 // storePutSession mirrors the session record (connected: StoppedAt zero;
 // disconnected: StoppedAt set).
 func (s *Server) storePutSession(cl *session.Client) {
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
-	if err := s.store.Sessions().Put(context.Background(), store.Session{
+	if err := st.Sessions().Put(context.Background(), store.Session{
 		ClientID:  cl.ID,
 		Expiry:    cl.Expiry(),
 		CreatedAt: cl.CreatedAt,
@@ -35,24 +36,26 @@ func (s *Server) storePutSession(cl *session.Client) {
 // storeDeleteSessionState removes every persisted trace of a session: the
 // row itself, its subscriptions and both inflight windows.
 func (s *Server) storeDeleteSessionState(clientID string) {
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
 	ctx := context.Background()
-	if err := s.store.Subscriptions().DeleteByClient(ctx, clientID); err != nil {
+	if err := st.Subscriptions().DeleteByClient(ctx, clientID); err != nil {
 		s.log.Debug("subscription purge failed", "client", clientID, "error", err)
 	}
-	if err := s.store.Inflight().DeleteByClient(ctx, clientID); err != nil {
+	if err := st.Inflight().DeleteByClient(ctx, clientID); err != nil {
 		s.log.Debug("inflight purge failed", "client", clientID, "error", err)
 	}
-	if err := s.store.Sessions().Delete(ctx, clientID); err != nil {
+	if err := st.Sessions().Delete(ctx, clientID); err != nil {
 		s.log.Debug("session delete failed", "client", clientID, "error", err)
 	}
 }
 
 // storePutSubscription mirrors one granted subscription.
 func (s *Server) storePutSubscription(clientID string, sub topics.Subscription) {
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
 	rec := store.Subscription{
@@ -66,17 +69,18 @@ func (s *Server) storePutSubscription(clientID string, sub topics.Subscription) 
 	if len(sub.Identifiers) > 0 {
 		rec.Identifier = sub.Identifiers[0]
 	}
-	if err := s.store.Subscriptions().Put(context.Background(), rec); err != nil {
+	if err := st.Subscriptions().Put(context.Background(), rec); err != nil {
 		s.log.Debug("subscription persist failed", "client", clientID, "filter", rec.Filter, "error", err)
 	}
 }
 
 // storeDeleteSubscription mirrors one removed subscription.
 func (s *Server) storeDeleteSubscription(clientID, filter string) {
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
-	if err := s.store.Subscriptions().Delete(context.Background(), clientID, filter); err != nil {
+	if err := st.Subscriptions().Delete(context.Background(), clientID, filter); err != nil {
 		s.log.Debug("subscription delete failed", "client", clientID, "filter", filter, "error", err)
 	}
 }
@@ -84,7 +88,8 @@ func (s *Server) storeDeleteSubscription(clientID, filter string) {
 // storePutOutbound mirrors one outbound inflight entry (queued, sent and
 // PUBREL-stage alike).
 func (s *Server) storePutOutbound(clientID string, msg *session.InflightMessage) {
-	if s.store == nil || msg == nil {
+	st := s.getStore()
+	if st == nil || msg == nil {
 		return
 	}
 	rec := store.InflightMessage{
@@ -96,14 +101,15 @@ func (s *Server) storePutOutbound(clientID string, msg *session.InflightMessage)
 		Pubrel:    msg.State == session.InflightPubrel,
 		Expiry:    msg.Expiry,
 	}
-	if err := s.store.Inflight().Put(context.Background(), rec); err != nil {
+	if err := st.Inflight().Put(context.Background(), rec); err != nil {
 		s.log.Debug("inflight persist failed", "client", clientID, "packetID", rec.PacketID, "error", err)
 	}
 }
 
 // storePutInbound mirrors one inbound QoS 2 PUBLISH awaiting its PUBREL.
 func (s *Server) storePutInbound(clientID string, pk *packet.Packet) {
-	if s.store == nil || pk == nil {
+	st := s.getStore()
+	if st == nil || pk == nil {
 		return
 	}
 	rec := store.InflightMessage{
@@ -113,7 +119,7 @@ func (s *Server) storePutInbound(clientID string, pk *packet.Packet) {
 		Packet:    *pk,
 		Expiry:    pk.Expiry,
 	}
-	if err := s.store.Inflight().Put(context.Background(), rec); err != nil {
+	if err := st.Inflight().Put(context.Background(), rec); err != nil {
 		s.log.Debug("inbound inflight persist failed", "client", clientID, "packetID", pk.PacketID, "error", err)
 	}
 }
@@ -122,7 +128,7 @@ func (s *Server) storePutInbound(clientID string, pk *packet.Packet) {
 // Maximum window slot: its persisted Sent flag flips so a crash-recovery
 // resend correctly carries DUP=1.
 func (s *Server) storePutPromoted(cl *session.Client, packetID uint16) {
-	if s.store == nil || cl == nil {
+	if s.getStore() == nil || cl == nil {
 		return
 	}
 	if msg, ok := cl.OutboundMessage(packetID); ok {
@@ -132,10 +138,11 @@ func (s *Server) storePutPromoted(cl *session.Client, packetID uint16) {
 
 // storeDeleteInflight mirrors one completed or expired inflight entry.
 func (s *Server) storeDeleteInflight(clientID string, dir store.Direction, packetID uint16) {
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
-	if err := s.store.Inflight().Delete(context.Background(), clientID, dir, packetID); err != nil {
+	if err := st.Inflight().Delete(context.Background(), clientID, dir, packetID); err != nil {
 		s.log.Debug("inflight delete failed", "client", clientID, "packetID", packetID, "error", err)
 	}
 }
@@ -147,18 +154,19 @@ func (s *Server) retain(pk packet.Packet) {
 		s.log.Warn("retain failed", "topic", pk.TopicName, "error", err)
 		return
 	}
-	if s.store == nil {
+	st := s.getStore()
+	if st == nil {
 		return
 	}
 	ctx := context.Background()
 	if len(pk.Payload) == 0 {
-		if err := s.store.Retained().Delete(ctx, pk.TopicName); err != nil {
+		if err := st.Retained().Delete(ctx, pk.TopicName); err != nil {
 			s.log.Debug("retained delete failed", "topic", pk.TopicName, "error", err)
 		}
 		return
 	}
 	pk.FixedHeader.Retain = true
-	if err := s.store.Retained().Put(ctx, store.RetainedMessage{
+	if err := st.Retained().Put(ctx, store.RetainedMessage{
 		Topic:  pk.TopicName,
 		Packet: pk,
 		Expiry: pk.Expiry,
@@ -175,11 +183,15 @@ func (s *Server) retain(pk packet.Packet) {
 // sessions that were connected at the crash (StoppedAt zero) restart their
 // expiry countdown at recovery time.
 func (s *Server) recoverStore() {
+	st := s.getStore()
+	if st == nil {
+		return
+	}
 	ctx := context.Background()
 	now := s.now()
 	var sessions, subs, inflight, retained, purged int
 
-	err := s.store.Sessions().Iterate(ctx, func(rec store.Session) bool {
+	err := st.Sessions().Iterate(ctx, func(rec store.Session) bool {
 		if rec.Expiry == 0 || sessionRowExpired(rec, now) {
 			purged++
 			s.storeDeleteSessionState(rec.ClientID)
@@ -207,7 +219,7 @@ func (s *Server) recoverStore() {
 		s.log.Error("session recovery failed", "error", err)
 	}
 
-	err = s.store.Subscriptions().Iterate(ctx, func(rec store.Subscription) bool {
+	err = st.Subscriptions().Iterate(ctx, func(rec store.Subscription) bool {
 		c := s.lookupConn(rec.ClientID)
 		if c == nil || c.sessionClient() == nil {
 			purged++
@@ -237,7 +249,7 @@ func (s *Server) recoverStore() {
 		s.log.Error("subscription recovery failed", "error", err)
 	}
 
-	err = s.store.Inflight().Iterate(ctx, func(rec store.InflightMessage) bool {
+	err = st.Inflight().Iterate(ctx, func(rec store.InflightMessage) bool {
 		c := s.lookupConn(rec.ClientID)
 		if c == nil || c.sessionClient() == nil {
 			purged++
@@ -278,10 +290,10 @@ func (s *Server) recoverStore() {
 		s.log.Error("inflight recovery failed", "error", err)
 	}
 
-	err = s.store.Retained().Iterate(ctx, func(rec store.RetainedMessage) bool {
+	err = st.Retained().Iterate(ctx, func(rec store.RetainedMessage) bool {
 		if !rec.Expiry.IsZero() && !now.Before(rec.Expiry) {
 			purged++
-			if err := s.store.Retained().Delete(ctx, rec.Topic); err != nil {
+			if err := st.Retained().Delete(ctx, rec.Topic); err != nil {
 				s.log.Debug("retained purge failed", "topic", rec.Topic, "error", err)
 			}
 			return true

@@ -82,7 +82,8 @@ type Options struct {
 	// messages (docs/design/persistence.md); nil runs memory-only. Wrap the
 	// store in a store.BatchWriter for asynchronous batched writes. When set,
 	// New synchronously recovers the persisted state before any listener
-	// accepts connections.
+	// accepts connections; a store attached later via SetStore (hot activation
+	// after the setup wizard) is recovered the same way.
 	Store store.Store
 	// Metrics receives the broker counters (docs/design/observability.md);
 	// nil selects a fresh zero-value set.
@@ -172,7 +173,9 @@ type Server struct {
 
 	closing   atomic.Bool
 	wg        sync.WaitGroup // connection goroutines
+	runCtx    context.Context
 	cancel    context.CancelFunc
+	listenErr []error
 	runDone   chan struct{}
 	closeOnce sync.Once
 
@@ -206,9 +209,44 @@ func New(opts Options) *Server {
 	return s
 }
 
-// AddListener registers a listener to be served by Run.
+// AddListener registers a listener. When the broker is already running
+// (Start or Run was called, e.g. the data plane activated after the setup
+// wizard) the listener is served immediately; otherwise Start or Run serves
+// it.
 func (s *Server) AddListener(l listener.Listener) {
+	s.mu.Lock()
 	s.listeners = append(s.listeners, l)
+	ctx := s.runCtx
+	s.mu.Unlock()
+	if ctx != nil {
+		s.serveAsync(ctx, l)
+	}
+}
+
+// SetStore attaches the persistence store at runtime (hot activation after
+// the setup wizard) and synchronously recovers the persisted state, like New
+// does for a store passed via Options. It is a no-op when a store is already
+// attached and reports whether st was attached.
+func (s *Server) SetStore(st store.Store) bool {
+	if st == nil {
+		return false
+	}
+	s.mu.Lock()
+	if s.store != nil {
+		s.mu.Unlock()
+		return false
+	}
+	s.store = st
+	s.mu.Unlock()
+	s.recoverStore()
+	return true
+}
+
+// getStore returns the attached persistence store, nil when memory-only.
+func (s *Server) getStore() store.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.store
 }
 
 // Topics exposes the subscription index.
@@ -225,36 +263,65 @@ func (s *Server) ClientCount() int {
 // ErrNoListeners is returned by Run when no listener was registered.
 var ErrNoListeners = errors.New("broker: no listeners configured")
 
+// Start begins the broker runtime without blocking: housekeeping, the
+// shutdown watcher and every registered listener. It is idempotent and may
+// be called with zero listeners (pre-setup), in which case AddListener
+// serves listeners as they are registered later. Close or ctx cancellation
+// shuts the broker down gracefully (see Run).
+func (s *Server) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s.runCtx = ctx
+	s.cancel = cancel
+	listeners := append([]listener.Listener(nil), s.listeners...)
+	s.mu.Unlock()
+
+	go s.housekeeping(ctx)
+	go func() {
+		<-ctx.Done()
+		s.shutdown()
+		close(s.runDone)
+	}()
+	for _, l := range listeners {
+		s.serveAsync(ctx, l)
+	}
+}
+
+// serveAsync serves one listener in its own goroutine; a serve error is
+// recorded for Run and logged.
+func (s *Server) serveAsync(ctx context.Context, l listener.Listener) {
+	s.log.Info("listening", "listener", l.ID(), "addr", l.Addr())
+	go func() {
+		if err := l.Serve(ctx, s.ServeConn); err != nil && !s.closing.Load() {
+			s.mu.Lock()
+			s.listenErr = append(s.listenErr, err)
+			s.mu.Unlock()
+			s.log.Error("listener serve failed", "listener", l.ID(), "error", err)
+		}
+	}()
+}
+
 // Run serves the registered listeners until ctx is cancelled or Close is
 // called, then shuts down gracefully: listeners stop accepting, connected v5
 // clients are notified with DISCONNECT 0x8B (Server shutting down), and
-// connection goroutines are waited on.
+// connection goroutines are waited on. Listeners registered via AddListener
+// while Run is active are served immediately.
 func (s *Server) Run(ctx context.Context) error {
-	if len(s.listeners) == 0 {
+	s.mu.RLock()
+	empty := len(s.listeners) == 0
+	s.mu.RUnlock()
+	if empty {
 		return ErrNoListeners
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
-	s.cancel = cancel
-	s.mu.Unlock()
-	defer close(s.runDone)
-
-	go s.housekeeping(ctx)
-
-	errCh := make(chan error, len(s.listeners))
-	for _, l := range s.listeners {
-		go func(l listener.Listener) { errCh <- l.Serve(ctx, s.ServeConn) }(l)
-		s.log.Info("listening", "listener", l.ID(), "addr", l.Addr())
-	}
-
-	<-ctx.Done()
-	s.shutdown()
-	for range s.listeners {
-		if err := <-errCh; err != nil {
-			return err
-		}
-	}
-	return nil
+	s.Start(ctx)
+	<-s.runDone
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return errors.Join(s.listenErr...)
 }
 
 // Close initiates a graceful shutdown and waits for Run to return. It is a
@@ -279,7 +346,10 @@ func (s *Server) shutdown() {
 	if !s.closing.CompareAndSwap(false, true) {
 		return
 	}
-	for _, l := range s.listeners {
+	s.mu.RLock()
+	listeners := append([]listener.Listener(nil), s.listeners...)
+	s.mu.RUnlock()
+	for _, l := range listeners {
 		_ = l.Close()
 	}
 	s.mu.RLock()

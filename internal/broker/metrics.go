@@ -62,7 +62,7 @@ func (s *Server) RefreshMetrics() {
 	s.mu.RUnlock()
 	s.Stats.Inflight.Store(inflight)
 
-	if bw, ok := s.store.(*store.BatchWriter); ok {
+	if bw, ok := s.getStore().(*store.BatchWriter); ok {
 		s.Stats.StoreWriteErrors.Store(bw.WriteErrors.Load())
 	}
 }

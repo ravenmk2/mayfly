@@ -10,6 +10,7 @@ import (
 
 	"github.com/ravenmk2/mayfly/internal/listener"
 	"github.com/ravenmk2/mayfly/internal/packet"
+	"github.com/ravenmk2/mayfly/internal/store"
 )
 
 func TestRetainedSemantics(t *testing.T) {
@@ -397,4 +398,57 @@ func TestGracefulShutdown(t *testing.T) {
 func TestServerRequiresListener(t *testing.T) {
 	s := newTestServer(t, nil)
 	require.ErrorIs(t, s.Run(context.Background()), ErrNoListeners)
+}
+
+// TestRuntimeListenerActivation covers the hot activation path (setup
+// wizard): a broker started without listeners serves listeners registered
+// later via AddListener, Start is idempotent, and shutdown still drains the
+// runtime-added listener.
+func TestRuntimeListenerActivation(t *testing.T) {
+	s := newTestServer(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	s.Start(ctx) // idempotent
+
+	l, err := listener.NewTCP(listener.TCPConfig{Address: "127.0.0.1:0"})
+	require.NoError(t, err)
+	s.AddListener(l)
+
+	c := dialTCP(t, l.Addr()).v3()
+	c.connect("late", true, packet.Properties{})
+	require.Eventually(t, func() bool { return s.ClientCount() == 1 },
+		2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, s.Close())
+	c.expectClosed(2 * time.Second)
+}
+
+// TestSetStoreRecoversRetained covers the store hot attach: SetStore
+// recovers the persisted state like a store passed to New, and a second
+// SetStore is a no-op.
+func TestSetStoreRecoversRetained(t *testing.T) {
+	seed := store.NewMemory()
+	require.NoError(t, seed.Retained().Put(context.Background(), store.RetainedMessage{
+		Topic: "seed/topic",
+		Packet: packet.Packet{
+			FixedHeader: packet.FixedHeader{Type: packet.Publish, Retain: true},
+			TopicName:   "seed/topic", Payload: []byte("persisted"),
+		},
+	}))
+
+	s := newTestServer(t, nil)
+	require.True(t, s.SetStore(seed))
+	assert.Equal(t, 1, s.Topics().RetainedCount(), "SetStore recovers persisted state")
+
+	require.False(t, s.SetStore(store.NewMemory()), "a store is attached at most once")
+
+	// Writes mirror into the attached store from now on.
+	require.NoError(t, s.Publish("live/topic", []byte("x"), true))
+	topics := map[string]bool{}
+	require.NoError(t, seed.Retained().Iterate(context.Background(), func(r store.RetainedMessage) bool {
+		topics[r.Topic] = true
+		return true
+	}))
+	assert.Contains(t, topics, "live/topic")
 }
