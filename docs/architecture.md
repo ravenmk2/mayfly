@@ -72,7 +72,7 @@ Mayfly 是轻量级 MQTT Broker，对标主流单机 broker 的核心能力，MQ
 | A1 | 单 `Packet` struct 承载 15 种包类型,每类型 Encode/Decode/Validate | 无反射、代码密度高；代码内标注 `[MQTT-x.x.x-x]` 规范条目号 |
 | A2 | 读/写 goroutine 分离 + **单写队列** | 保序、背压集中、读循环永不被对端慢拖累 |
 | A3 | topic 树读路径无全局锁(逐层 RWMutex),写路径全局锁 | 订阅变更是低频操作,publish 匹配是热路径 |
-| A4 | 共享订阅 per-group 原子游标 round-robin | 避免伪随机选人；策略接口预留 sticky/hash |
+| A4 | 共享订阅 per-group 原子游标 round-robin | 避免伪随机选人;策略接口预留 sticky/hash |
 | A5 | ACL:订阅时校验 subscribe 权限,发布时校验 publish 权限,**投递时不再逐订阅者复查** | 消除投递热路径的 ACL 成本；ACL 变更对存量订阅的回收靠缓存刷新+会话重订阅,文档明示 |
 | A6 | 内存为权威状态,Store 异步批量落盘(默认 100ms/批量) | 接受 ~100ms 崩溃窗口换吞吐；启动增量恢复 |
 | A7 | 认证/授权分离，各自为多源链式 fall-through(有序链式)；一期 file+db 源，http 二期;MQTT 用户与 Console 用户分表 | 弱源不能绕过强源；设备凭据与管理权限隔离；外接认证预留 |
