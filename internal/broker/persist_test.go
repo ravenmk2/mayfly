@@ -47,11 +47,15 @@ func TestStoreWiringAndRecovery(t *testing.T) {
 
 	pub := dial(t, s1).v5()
 	pub.connect("pub", true, packet.Properties{})
+	// QoS 1 + PUBACK is the synchronization point: without it the broker
+	// read loop may not have processed the retained publish before Close.
 	pub.write(&packet.Packet{
-		FixedHeader: packet.FixedHeader{Type: packet.Publish, Qos: 0, Retain: true},
+		FixedHeader: packet.FixedHeader{Type: packet.Publish, Qos: 1, Retain: true},
 		TopicName:   "retain/topic",
 		Payload:     []byte("kept"),
+		PacketID:    1,
 	})
+	require.Equal(t, packet.Puback, pub.read().FixedHeader.Type)
 
 	dev.write(&packet.Packet{FixedHeader: packet.FixedHeader{Type: packet.Disconnect}})
 	dev.expectClosed(time.Second)

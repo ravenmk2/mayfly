@@ -66,12 +66,15 @@ func TestCrashRecoveryEquivalence(t *testing.T) {
 	sub.write(&packet.Packet{FixedHeader: packet.FixedHeader{Type: packet.Pubrec}, PacketID: m2.PacketID})
 	require.Equal(t, packet.Pubrel, sub.read().FixedHeader.Type)
 
-	// A retained message on a topic outside the subscription.
+	// A retained message on a topic outside the subscription. QoS 1 + PUBACK
+	// is an explicit synchronization point for the broker-side handling.
 	pub.write(&packet.Packet{
-		FixedHeader: packet.FixedHeader{Type: packet.Publish, Retain: true},
+		FixedHeader: packet.FixedHeader{Type: packet.Publish, Qos: 1, Retain: true},
 		TopicName:   "other/ret",
 		Payload:     []byte("kept"),
+		PacketID:    10,
 	})
+	require.Equal(t, packet.Puback, pub.read().FixedHeader.Type)
 
 	// Clean disconnect; wait until the session is marked stopped so the next
 	// publish deterministically takes the offline-queue path.
