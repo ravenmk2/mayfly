@@ -76,10 +76,6 @@
               <el-button size="small" text type="danger">删除</el-button></template></el-popconfirm>
           </template></el-table-column>
         </el-table>
-        <div style="margin-top:14px; display:flex; justify-content:flex-end">
-          <el-pagination layout="total, prev, pager, next" :total="aclsTotal" :page-size="pageSize"
-                         :current-page="aclsPage" @current-change="loadAcls"></el-pagination>
-        </div>
       </el-tab-pane>
 
       <!-- ============ 规则演练 ============ -->
@@ -354,20 +350,19 @@ async function removeUser(row) {
 }
 
 /* ---------- ACL 规则 ---------- */
+// 服务端不自动分配 seq(新规则 seq=0,按 seq+id 排序);加载后把顺序归一化
+// 为 1..n,使"上移"交换与新建追加有确定语义。
 const acls = ref([]);
-const aclsTotal = ref(0);
-const aclsPage = ref(1);
 const aclsLoading = ref(false);
 const dlgAcl = ref(false);
 const aclForm = reactive({ editing: 0, subjectType: 'all', subject: '', action: 'allow', permission: 'pubsub', topic: '', seq: 0 });
 
-async function loadAcls(p) {
-  aclsPage.value = p || aclsPage.value;
+async function loadAcls() {
   aclsLoading.value = true;
   try {
-    const res = await listAcls({ page: aclsPage.value, limit: pageSize });
-    acls.value = (res.items || []).slice().sort((a, b) => a.seq - b.seq);
-    aclsTotal.value = res.total || 0;
+    const res = await listAcls({ page: 1, limit: 500 });
+    acls.value = res.items || [];
+    await normalizeSeqs();
   } catch (e) {
     ElMessage.error(e.message);
   } finally {
@@ -375,9 +370,25 @@ async function loadAcls(p) {
   }
 }
 
+async function normalizeSeqs() {
+  const dirty = [];
+  acls.value.forEach((r, i) => {
+    if (r.seq !== i + 1) dirty.push({ id: r.id, seq: i + 1, row: r });
+  });
+  if (!dirty.length) return;
+  try {
+    for (const d of dirty) {
+      await updateAcl(d.id, { ...d.row, seq: d.seq });
+      d.row.seq = d.seq;
+    }
+  } catch (e) {
+    ElMessage.error(e.message);
+  }
+}
+
 function openAclDlg(row) {
   aclForm.editing = row ? row.id : 0;
-  aclForm.seq = row ? row.seq : 0;
+  aclForm.seq = row ? row.seq : acls.value.length + 1;
   aclForm.subjectType = row ? (row.username ? 'user' : row.clientid ? 'cid' : 'all') : 'all';
   aclForm.subject = row ? (row.username || row.clientid || '') : '';
   aclForm.action = row ? row.action : 'allow';
@@ -452,6 +463,6 @@ const pgEval = computed(() => evalRules(playgroundRules, pgForm));
 onMounted(() => {
   loadChains();
   loadUsers(1);
-  loadAcls(1);
+  loadAcls();
 });
 </script>
