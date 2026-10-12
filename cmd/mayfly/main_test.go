@@ -62,3 +62,39 @@ func TestLogOutputRotation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "rotation filler")
 }
+
+func TestEffectiveDataDirPrecedence(t *testing.T) {
+	// --data-dir wins over the environment.
+	t.Setenv("MAYFLY_DATA_DIR", "env-dir")
+	assert.Equal(t, "flag-dir", effectiveDataDir(cliFlags{dataDir: "flag-dir"}))
+	assert.Equal(t, "env-dir", effectiveDataDir(cliFlags{}))
+
+	os.Unsetenv("MAYFLY_DATA_DIR") //nolint:errcheck // clearing the test override
+	assert.Equal(t, config.DefaultDataDir, effectiveDataDir(cliFlags{}))
+}
+
+// TestLoadConfigFollowsDataDir is the regression test for the setup defect:
+// after the wizard writes mayfly.yaml into --data-dir, the next start must
+// load it from there instead of the built-in default path.
+func TestLoadConfigFollowsDataDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mayfly.yaml"),
+		[]byte("log:\n  level: debug\n"), 0o600))
+
+	cfg, fromFile, err := loadConfig(cliFlags{dataDir: dir})
+	require.NoError(t, err)
+	assert.True(t, fromFile, "mayfly.yaml inside --data-dir must be found")
+	assert.Equal(t, "debug", cfg.Log.Level)
+}
+
+func TestLoadConfigMissingInDataDirFallsBack(t *testing.T) {
+	cfg, fromFile, err := loadConfig(cliFlags{dataDir: t.TempDir()})
+	require.NoError(t, err)
+	assert.False(t, fromFile)
+	assert.Equal(t, ":1883", cfg.Listeners[0].Address)
+}
+
+func TestLoadConfigExplicitMissingFails(t *testing.T) {
+	_, _, err := loadConfig(cliFlags{config: filepath.Join(t.TempDir(), "nope.yaml"), dataDir: t.TempDir()})
+	require.Error(t, err)
+}

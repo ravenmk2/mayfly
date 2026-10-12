@@ -31,10 +31,20 @@ const envPrefix = "MAYFLY_"
 // MAYFLY_BROKER_MAX_PACKET_SIZE both set broker.max_packet_size. Listeners
 // and auth chains (arrays) are not settable via the environment.
 func Load(path string) (cfg *Config, fromFile bool, err error) {
-	explicit := path != ""
-	if !explicit {
-		path = DefaultPath
-	}
+	return load(path, path != "")
+}
+
+// LoadDefault reads mayfly.yaml inside dataDir with default-path semantics:
+// a missing file is not an error and yields the built-in Default. It serves
+// startups that derive the configuration path from the effective data
+// directory (--data-dir / MAYFLY_DATA_DIR / ./data).
+func LoadDefault(dataDir string) (cfg *Config, fromFile bool, err error) {
+	return load(DefaultPathFor(dataDir), false)
+}
+
+// load reads path; required distinguishes an explicitly requested file
+// (missing is an error) from a derived default (missing selects Default).
+func load(path string, required bool) (cfg *Config, fromFile bool, err error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
@@ -45,7 +55,7 @@ func Load(path string) (cfg *Config, fromFile bool, err error) {
 			return nil, false, fmt.Errorf("config: parse %s: %w", path, err)
 		}
 		fromFile = true
-	case errors.Is(err, fs.ErrNotExist) && !explicit:
+	case errors.Is(err, fs.ErrNotExist) && !required:
 		cfg = Default()
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false, fmt.Errorf("config: %s: %w", path, err)

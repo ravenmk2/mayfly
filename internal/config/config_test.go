@@ -270,3 +270,27 @@ func TestDurationUnmarshal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Duration(250*time.Millisecond), cfg.Auth.RefreshInterval)
 }
+
+func TestLoadDefaultFollowsDataDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mayfly.yaml"),
+		[]byte("log:\n  level: debug\n"), 0o600))
+
+	cfg, fromFile, err := LoadDefault(dir)
+	require.NoError(t, err)
+	assert.True(t, fromFile)
+	assert.Equal(t, "debug", cfg.Log.Level)
+}
+
+func TestLoadDefaultMissingFallsBack(t *testing.T) {
+	cfg, fromFile, err := LoadDefault(t.TempDir())
+	require.NoError(t, err)
+	assert.False(t, fromFile)
+	assert.Equal(t, ":1883", cfg.Listeners[0].Address)
+}
+
+func TestDefaultPathFor(t *testing.T) {
+	assert.Equal(t, filepath.Join("custom/dir", "mayfly.yaml"), DefaultPathFor("custom/dir"))
+	// filepath.Join cleans the "./" prefix; the result names the same file.
+	assert.Equal(t, filepath.Join("data", "mayfly.yaml"), DefaultPathFor(DefaultDataDir))
+}

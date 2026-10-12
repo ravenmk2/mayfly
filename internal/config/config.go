@@ -9,14 +9,25 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
 // DefaultPath is the configuration file used when --config is not given
-// (docs/design/setup.md section 1).
-const DefaultPath = "./data/mayfly.yaml"
+// (docs/design/setup.md section 1). The effective path follows the data
+// directory: DefaultPathFor(DefaultDataDir).
+const DefaultPath = DefaultDataDir + "/mayfly.yaml"
+
+// DefaultDataDir is the data directory used when neither --data-dir nor
+// MAYFLY_DATA_DIR is given.
+const DefaultDataDir = "./data"
+
+// DefaultPathFor returns the configuration path inside a data directory.
+func DefaultPathFor(dataDir string) string {
+	return filepath.Join(dataDir, "mayfly.yaml")
+}
 
 // Listener types accepted in the listeners array.
 const (

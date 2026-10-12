@@ -4,7 +4,7 @@
 
 高到低：CLI flag > `MAYFLY_*` 环境变量 > YAML 文件 > 内置默认。
 
-- 文件:`--config` 指定,默认 `./data/mayfly.yaml`(docs/design/setup.md)。默认路径文件不存在 → 用内置默认并告警;显式指定的文件不存在 → 启动失败。
+- 文件:`--config` 指定,默认 `<data-dir>/mayfly.yaml`(docs/design/setup.md);data-dir 生效优先级为 `--data-dir` > `MAYFLY_DATA_DIR` > `./data`,即 `--data-dir` 同时迁移配置文件的默认位置。默认路径文件不存在 → 用内置默认并告警;显式指定的文件不存在 → 启动失败。
 - 环境变量:`MAYFLY_` 前缀 + 下划线分隔的键路径,贪心匹配多词键:`MAYFLY_LOG_LEVEL` → `log.level`,`MAYFLY_DATA_DIR` → `data_dir`,`MAYFLY_BROKER_MAX_PACKET_SIZE` / `MAYFLY_BROKER__MAX_PACKET_SIZE` 均可。数组(listeners、auth 链)不支持 env 覆盖。无法映射的 `MAYFLY_*` 变量报错(防手误);`MAYFLY_SETUP_*`(安装向导)与 `MAYFLY_TEST_*`(测试)保留跳过。
 - CLI flag:`--config`、`--data-dir`、`--version`。
 - 配置热更新不做,重启生效(架构 A10 一期范围)。

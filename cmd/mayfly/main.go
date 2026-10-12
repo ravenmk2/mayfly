@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -42,11 +41,34 @@ type cliFlags struct {
 
 func parseFlags() cliFlags {
 	var f cliFlags
-	flag.StringVar(&f.config, "config", "", "path to mayfly.yaml (default "+config.DefaultPath+")")
+	flag.StringVar(&f.config, "config", "", "path to mayfly.yaml (default <data-dir>/mayfly.yaml)")
 	flag.StringVar(&f.dataDir, "data-dir", "", "data directory (overrides data_dir)")
 	flag.BoolVar(&f.showVersion, "version", false, "print the version and exit")
 	flag.Parse()
 	return f
+}
+
+// effectiveDataDir resolves the data directory in precedence order:
+// --data-dir flag > MAYFLY_DATA_DIR > the built-in default.
+func effectiveDataDir(flags cliFlags) string {
+	if flags.dataDir != "" {
+		return flags.dataDir
+	}
+	if v := os.Getenv("MAYFLY_DATA_DIR"); v != "" {
+		return v
+	}
+	return config.DefaultDataDir
+}
+
+// loadConfig loads the configuration: --config when given, otherwise
+// mayfly.yaml inside the effective data directory (docs/design/setup.md
+// section 1). The data directory is resolved before the configuration path
+// so --data-dir relocates mayfly.yaml as well.
+func loadConfig(flags cliFlags) (cfg *config.Config, fromFile bool, err error) {
+	if flags.config != "" {
+		return config.Load(flags.config)
+	}
+	return config.LoadDefault(effectiveDataDir(flags))
 }
 
 // logOutput resolves the configured log destination; file paths get
@@ -245,7 +267,7 @@ func main() {
 		return
 	}
 
-	cfg, fromFile, err := config.Load(flags.config)
+	cfg, fromFile, err := loadConfig(flags)
 	if err != nil {
 		log.Fatalf("configuration: %v", err)
 	}
@@ -264,8 +286,8 @@ func main() {
 
 	// Non-interactive setup runs before the first-run detection and is
 	// followed by a configuration reload (docs/design/setup.md section 5).
-	if !fromFile && envSetup(ctx, logger, cfg.DataDir, filepath.Join(cfg.DataDir, "mayfly.yaml")) {
-		cfg, fromFile, err = config.Load(filepath.Join(cfg.DataDir, "mayfly.yaml"))
+	if !fromFile && envSetup(ctx, logger, cfg.DataDir, config.DefaultPathFor(cfg.DataDir)) {
+		cfg, fromFile, err = loadConfig(flags)
 		if err != nil {
 			log.Fatalf("configuration: %v", err)
 		}
@@ -275,7 +297,7 @@ func main() {
 	}
 	if !fromFile {
 		logger.Warn("no configuration file found; running with built-in defaults",
-			"path", config.DefaultPath)
+			"path", config.DefaultPathFor(effectiveDataDir(flags)))
 	}
 
 	masterKey, persisted, err := admin.LoadMasterKey(cfg.DataDir, logger)
