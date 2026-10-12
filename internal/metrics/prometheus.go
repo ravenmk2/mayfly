@@ -14,8 +14,10 @@ import (
 // PromOptions configures the Prometheus handler.
 type PromOptions struct {
 	// AuthStats reports the per-source authentication/authorization chain
-	// outcomes (auth.Manager.Stats); nil exports the broker-level aggregate
-	// mayfly_auth_results_total{result} instead.
+	// outcomes (auth.Manager.Stats); a nil function or an empty result
+	// exports the broker-level aggregate mayfly_auth_results_total{result}
+	// instead. The closure may change which it returns over time (a chain
+	// manager hot-attached after setup starts emitting per-source series).
 	AuthStats func() []auth.SourceStat
 }
 
@@ -135,8 +137,12 @@ func (c *collector) collect(descCh chan<- *prometheus.Desc, metricCh chan<- prom
 	emit(c.subscriptions, prometheus.GaugeValue, float64(m.Subscriptions.Load()))
 	emit(c.retained, prometheus.GaugeValue, float64(m.Retained.Load()))
 	emit(c.inflight, prometheus.GaugeValue, float64(m.Inflight.Load()))
+	var stats []auth.SourceStat
 	if c.authStats != nil {
-		for _, st := range c.authStats() {
+		stats = c.authStats()
+	}
+	if len(stats) > 0 {
+		for _, st := range stats {
 			emit(c.authSrcResults, prometheus.CounterValue, float64(st.Allow), st.Source, st.Chain, "allow")
 			emit(c.authSrcResults, prometheus.CounterValue, float64(st.Deny), st.Source, st.Chain, "deny")
 			emit(c.authSrcResults, prometheus.CounterValue, float64(st.Miss), st.Source, st.Chain, "miss")
