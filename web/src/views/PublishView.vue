@@ -10,7 +10,7 @@
           <el-form-item label="QoS" style="width:150px">
             <el-select model-value="0" disabled><el-option value="0" label="QoS 0"></el-option></el-select>
           </el-form-item>
-          <el-form-item label="Retained"><el-switch v-model="form.retain"></el-switch></el-form-item>
+          <el-form-item label="Retained" style="width:90px"><el-switch v-model="form.retain"></el-switch></el-form-item>
           <el-form-item label="Payload 格式" style="width:140px">
             <el-select v-model="form.fmt">
               <el-option value="text" label="Text"></el-option>
