@@ -470,6 +470,55 @@ func toSourceConfig(in []struct {
 	return out
 }
 
+// resolveMaskedDSNs substitutes the mask sentinel of db sources with the DSN
+// of the matching source in the current configuration, so a configuration
+// round-trip through GET (which masks the password) does not corrupt the db
+// source. Matching is by chain position first, then by masked form.
+func resolveMaskedDSNs(req, cur []auth.SourceConfig) ([]auth.SourceConfig, error) {
+	out := make([]auth.SourceConfig, len(req))
+	copy(out, req)
+	for i, sc := range out {
+		if sc.Type != "db" || !isMaskedDSN(sc.DSN) {
+			continue
+		}
+		dsn, ok := matchCurrentDSN(i, sc.DSN, cur)
+		if !ok {
+			return nil, fmt.Errorf("db source %d: the masked dsn matches no current db source; provide the full dsn to change it", i)
+		}
+		out[i].DSN = dsn
+	}
+	return out, nil
+}
+
+// matchCurrentDSN finds the current db source behind a masked request DSN:
+// the source at the same chain position first, then any current db source
+// whose masked form equals the request's.
+func matchCurrentDSN(pos int, masked string, cur []auth.SourceConfig) (string, bool) {
+	if pos < len(cur) && cur[pos].Type == "db" && maskDSN(cur[pos].DSN) == masked {
+		return cur[pos].DSN, true
+	}
+	for _, sc := range cur {
+		if sc.Type == "db" && maskDSN(sc.DSN) == masked {
+			return sc.DSN, true
+		}
+	}
+	return "", false
+}
+
+// isMaskedDSN reports whether dsn carries the mask sentinel maskDSN
+// produces: a mysql DSN whose password is literally "***".
+func isMaskedDSN(dsn string) bool {
+	if dsn == "mysql:***" {
+		return true
+	}
+	scheme, rest, ok := strings.Cut(dsn, ":")
+	if !ok || scheme != "mysql" {
+		return false
+	}
+	cfg, err := mysqldrv.ParseDSN(rest)
+	return err == nil && cfg.Passwd == "***"
+}
+
 // putChains validates the new chain configuration by assembling a manager
 // from it (unknown types, missing fields and a second db source per chain
 // are rejected), then swaps the broker's chains atomically. The update is
@@ -483,10 +532,24 @@ func (s *Server) putChains(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return abort(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 	}
+	// GET masks db source passwords; a masked DSN echoed back by the client
+	// keeps the current source's real DSN.
+	var cur auth.Config
+	if m := s.currentAuthManager(); m != nil {
+		cur = m.Config()
+	}
+	authn, err := resolveMaskedDSNs(toSourceConfig(req.Authentication), cur.Authentication)
+	if err != nil {
+		return abort(c, http.StatusBadRequest, "bad_request", err.Error())
+	}
+	authz, err := resolveMaskedDSNs(toSourceConfig(req.Authorization), cur.Authorization)
+	if err != nil {
+		return abort(c, http.StatusBadRequest, "bad_request", err.Error())
+	}
 	cfg := auth.Config{
 		AnonymousAllow:  req.AnonymousAllow,
-		Authentication:  toSourceConfig(req.Authentication),
-		Authorization:   toSourceConfig(req.Authorization),
+		Authentication:  authn,
+		Authorization:   authz,
 		RefreshInterval: auth.DefaultRefreshInterval,
 	}
 	mgr, err := auth.NewManager(c.Request().Context(), cfg, s.log)

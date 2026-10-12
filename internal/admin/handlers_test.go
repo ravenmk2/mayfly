@@ -414,6 +414,78 @@ func TestMaskDSN(t *testing.T) {
 	assert.NotContains(t, masked, "secret")
 }
 
+// TestPutChainsMaskedDSN covers the DSN round-trip through GET: the masked
+// password sentinel must resolve back to the current source's real DSN
+// instead of replacing it, while an explicit new DSN must take effect.
+func TestPutChainsMaskedDSN(t *testing.T) {
+	// The MySQL DSNs point at an unreachable port: managers build a
+	// fail-closed source without needing a live database.
+	const realDSN = "mysql:root:secret@tcp(127.0.0.1:1)/mayfly"
+	const otherDSN = "mysql:root:other-pass@tcp(127.0.0.1:1)/mayfly"
+	masked := maskDSN(realDSN)
+	require.Contains(t, masked, "***")
+
+	newServer := func(t *testing.T, dsn string) (*Server, *echo.Echo) {
+		t.Helper()
+		mgr, err := auth.NewManager(t.Context(), auth.Config{
+			Authentication: []auth.SourceConfig{{Type: "db", Enabled: true, DSN: dsn}},
+			Authorization:  []auth.SourceConfig{{Type: "db", Enabled: true, DSN: dsn}},
+		}, testLogger())
+		require.NoError(t, err)
+		s, e := testAPI(t, func(o *Options) {
+			o.AuthManager = mgr
+			o.ApplyChains = func(m *auth.Manager) {}
+		})
+		seedUser(t, s, "admin", "s3cret")
+		return s, e
+	}
+	putBody := func(dsn string) map[string]any {
+		src := map[string]any{"type": "db", "dsn": dsn}
+		return map[string]any{"authentication": []any{src}, "authorization": []any{src}}
+	}
+
+	t.Run("masked dsn round-trip keeps the real dsn", func(t *testing.T) {
+		s, e := newServer(t, realDSN)
+		authH := bearer(loginToken(t, e, "admin", "s3cret"))
+
+		// GET masks the password.
+		code, body := do(t, e, http.MethodGet, "/api/v1/auth/chains", nil, authH)
+		require.Equal(t, http.StatusOK, code)
+		authn, _ := body["authentication"].([]any)
+		require.Len(t, authn, 1)
+		src, _ := authn[0].(map[string]any)
+		assert.Equal(t, masked, src["dsn"])
+
+		// PUTting the masked view back must not corrupt the source.
+		code, body = do(t, e, http.MethodPut, "/api/v1/auth/chains", putBody(masked), authH)
+		require.Equal(t, http.StatusOK, code, "body: %v", body)
+		assert.Equal(t, realDSN, s.currentAuthManager().Config().Authentication[0].DSN)
+		assert.Equal(t, realDSN, s.currentAuthManager().Config().Authorization[0].DSN)
+	})
+
+	t.Run("explicit dsn change takes effect", func(t *testing.T) {
+		s, e := newServer(t, realDSN)
+		authH := bearer(loginToken(t, e, "admin", "s3cret"))
+
+		code, body := do(t, e, http.MethodPut, "/api/v1/auth/chains", putBody(otherDSN), authH)
+		require.Equal(t, http.StatusOK, code, "body: %v", body)
+		assert.Equal(t, otherDSN, s.currentAuthManager().Config().Authentication[0].DSN)
+	})
+
+	t.Run("masked dsn without a current source is rejected", func(t *testing.T) {
+		s, e := testAPI(t, func(o *Options) {
+			o.ApplyChains = func(m *auth.Manager) {}
+		})
+		seedUser(t, s, "admin", "s3cret")
+		authH := bearer(loginToken(t, e, "admin", "s3cret"))
+
+		code, body := do(t, e, http.MethodPut, "/api/v1/auth/chains", putBody(masked), authH)
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Equal(t, "bad_request", body["code"])
+		assert.Contains(t, body["message"], "masked dsn")
+	})
+}
+
 func TestUsersWithoutDBSource(t *testing.T) {
 	s, e := testAPI(t, func(o *Options) {
 		o.Broker = broker.New(broker.Options{Logger: testLogger()})
