@@ -162,6 +162,7 @@ func TestConnectionsEndpoints(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, code)
 	code, body = do(t, e, http.MethodDelete, "/api/v1/connections/ghost", nil, auth)
 	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, "not_found", body["code"])
 }
 
 func TestSessionsEndpoints(t *testing.T) {
@@ -176,7 +177,7 @@ func TestSessionsEndpoints(t *testing.T) {
 	require.NotNil(t, sess)
 	assert.Equal(t, "sess-1", sess["client_id"])
 
-	code, body = do(t, e, http.MethodGet, "/api/v1/sessions/ghost", nil, auth)
+	code, _ = do(t, e, http.MethodGet, "/api/v1/sessions/ghost", nil, auth)
 	assert.Equal(t, http.StatusNotFound, code)
 
 	code, _ = do(t, e, http.MethodDelete, "/api/v1/sessions/sess-1", nil, auth)
@@ -312,7 +313,7 @@ func TestUsersCRUD(t *testing.T) {
 	assert.True(t, res.OK)
 	assert.True(t, res.Superuser)
 
-	code, body = do(t, e, http.MethodPut, "/api/v1/users/ghost", map[string]any{"superuser": true}, authH)
+	code, _ = do(t, e, http.MethodPut, "/api/v1/users/ghost", map[string]any{"superuser": true}, authH)
 	assert.Equal(t, http.StatusNotFound, code)
 
 	// Delete, then 404 on retry.
@@ -352,7 +353,7 @@ func TestACLsCRUD(t *testing.T) {
 		map[string]any{"seq": 2, "action": "deny", "permission": "subscribe", "topic": "devices/secret"}, authH)
 	require.Equal(t, http.StatusOK, code)
 
-	code, body = do(t, e, http.MethodPut, "/api/v1/acls/999",
+	code, _ = do(t, e, http.MethodPut, "/api/v1/acls/999",
 		map[string]any{"action": "allow", "permission": "publish", "topic": "a/#"}, authH)
 	assert.Equal(t, http.StatusNotFound, code)
 

@@ -26,6 +26,8 @@
 
 完成后写 `./data/mayfly.yaml`,初始化 schema(auto-migrate),进入登录页。
 
+> 当前生成的 mayfly.yaml 以明文保存 DSN(含 MySQL 密码);`enc:` 加密存储(见第 4 节)尚未实现,后续里程碑补齐。
+
 ## 4. 主密钥用途
 
 - Console 会话 JWT(HS256)签名密钥;
@@ -40,6 +42,6 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/v1/setup/status` | `{initialized: bool}`;未初始化时 Console 据此进向导 |
+| GET | `/api/v1/setup/status` | `{initialized: bool}`;initialized = 配置文件存在且 `admin_user` 非空,未初始化时 Console 据此进向导 |
 | POST | `/api/v1/setup/test-db` | 向导内测试 MySQL 连接(不持久化) |
-| POST | `/api/v1/setup` | 执行初始化(db 选择、admin 密码);已初始化返回 410 Gone |
+| POST | `/api/v1/setup` | 执行初始化(db 选择、admin 密码);已初始化返回 410 Gone。成功响应 `{initialized: true, restart_required: true}`:管理面即刻解锁(签发 JWT 的主密钥已切换为落盘密钥),MQTT 监听器需重启进程后启动 |

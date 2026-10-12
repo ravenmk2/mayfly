@@ -28,14 +28,14 @@ type ConnInfo struct {
 	CreatedAt time.Time
 	// StoppedAt is the disconnect time of an offline session (zero while
 	// connected).
-	StoppedAt      time.Time
-	Keepalive      uint16
-	CleanStart     bool
-	SessionExpiry  uint32
-	Superuser      bool
-	Subscriptions  int
-	InflightOut    int
-	InflightIn     int
+	StoppedAt     time.Time
+	Keepalive     uint16
+	CleanStart    bool
+	SessionExpiry uint32
+	Superuser     bool
+	Subscriptions int
+	InflightOut   int
+	InflightIn    int
 }
 
 // connInfo snapshots one registered connection.

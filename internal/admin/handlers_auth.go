@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
 	mysqldrv "github.com/go-sql-driver/mysql"
+	"github.com/labstack/echo/v4"
 
 	"github.com/ravenmk2/mayfly/internal/auth"
 )

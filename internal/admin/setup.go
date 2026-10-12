@@ -126,6 +126,9 @@ func PerformSetup(ctx context.Context, dataDir, configPath string, in SetupInput
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return nil, fmt.Errorf("admin: create data dir: %w", err)
+	}
 	mainDSN := in.MainDSN(dataDir)
 
 	// Probe the database and apply the auth schema before touching any file:

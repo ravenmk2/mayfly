@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,9 +14,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/ravenmk2/mayfly/internal/admin"
 	"github.com/ravenmk2/mayfly/internal/auth"
 	"github.com/ravenmk2/mayfly/internal/broker"
 	"github.com/ravenmk2/mayfly/internal/config"
@@ -90,12 +94,13 @@ func newLogger(lc config.LogConfig) (*slog.Logger, io.Closer) {
 // buildAuth assembles the authentication/authorization chains. With no
 // source configured at all the broker stays on the allow-all stub and logs
 // a warning; a chain without sources falls back to allow-all as well so a
-// users-only demo stays usable. The returned authStats feeds the per-source
-// Prometheus breakdown (nil when no auth manager exists).
-func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) (hook.Authenticator, hook.Gate, func() []auth.SourceStat, func(context.Context), func() error) {
+// users-only demo stays usable. The returned manager (nil without sources)
+// feeds the per-source Prometheus breakdown and the admin API's chain
+// management.
+func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) (hook.Authenticator, hook.Gate, *auth.Manager) {
 	if !cfg.HasSources() {
 		logger.Warn("no authentication configured, allowing all clients")
-		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), nil, func(context.Context) {}, func() error { return nil }
+		return hook.NewAuthChain(hook.AllowAll{}), hook.NewAuthzChain(hook.AllowAll{}), nil
 	}
 
 	authCfg := cfg.ToAuthConfig()
@@ -104,17 +109,22 @@ func buildAuth(ctx context.Context, logger *slog.Logger, cfg config.AuthConfig) 
 		log.Fatalf("auth setup: %v", err)
 	}
 
+	authn, authz := chainViews(m, authCfg)
+	return authn, authz, m
+}
+
+// chainViews derives the broker-facing chains from a manager, falling back
+// to the allow-all stub for a chain without sources.
+func chainViews(m *auth.Manager, cfg auth.Config) (hook.Authenticator, hook.Gate) {
 	var authn hook.Authenticator = m
-	if len(authCfg.Authentication) == 0 {
-		logger.Warn("no authentication source configured, allowing all clients")
+	if len(cfg.Authentication) == 0 {
 		authn = hook.NewAuthChain(hook.AllowAll{})
 	}
 	var authz hook.Gate = m
-	if len(authCfg.Authorization) == 0 {
-		logger.Warn("no authorization source configured, allowing all operations")
+	if len(cfg.Authorization) == 0 {
 		authz = hook.NewAuthzChain(hook.AllowAll{})
 	}
-	return authn, authz, m.Stats, m.Start, m.Close
+	return authn, authz
 }
 
 // buildStore assembles the persistence layer: the SQL store from the DSN
@@ -182,6 +192,52 @@ func buildListener(lc config.ListenerConfig) (listener.Listener, error) {
 	}
 }
 
+// buildAdminStore opens the management store on the primary database, or the
+// in-memory store for memory-only runs (docs/design/admin-api.md section 2).
+func buildAdminStore(dsn string) admin.Store {
+	if dsn == "" {
+		return admin.NewMemoryStore()
+	}
+	st, err := admin.OpenSQLStore(dsn)
+	if err != nil {
+		log.Fatalf("admin store setup: %v", err)
+	}
+	return st
+}
+
+// envSetup runs the non-interactive installation when MAYFLY_SETUP_DB and
+// MAYFLY_SETUP_ADMIN_PASSWORD are set and no configuration file exists yet
+// (docs/design/setup.md section 5). It reports whether setup ran; the caller
+// then reloads the generated configuration.
+func envSetup(ctx context.Context, logger *slog.Logger, dataDir, configPath string) bool {
+	dbType := os.Getenv("MAYFLY_SETUP_DB")
+	password := os.Getenv("MAYFLY_SETUP_ADMIN_PASSWORD")
+	if dbType == "" && password == "" {
+		return false
+	}
+	if dbType == "" || password == "" {
+		log.Fatalf("setup: MAYFLY_SETUP_DB and MAYFLY_SETUP_ADMIN_PASSWORD must both be set")
+	}
+	_, err := admin.PerformSetup(ctx, dataDir, configPath, admin.SetupInput{
+		DBType:        dbType,
+		DSN:           os.Getenv("MAYFLY_SETUP_MYSQL_DSN"),
+		AdminPassword: password,
+	}, logger)
+	if err != nil {
+		log.Fatalf("setup: %v", err)
+	}
+	logger.Info("non-interactive setup completed", "db", dbType)
+	return true
+}
+
+// randomPassword returns a random plaintext password for the generated
+// initial console admin of memory-only runs.
+func randomPassword() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func main() {
 	flags := parseFlags()
 	if flags.showVersion {
@@ -202,24 +258,86 @@ func main() {
 			_ = closeLog.Close()
 		}
 	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Non-interactive setup runs before the first-run detection and is
+	// followed by a configuration reload (docs/design/setup.md section 5).
+	if !fromFile && envSetup(ctx, logger, cfg.DataDir, filepath.Join(cfg.DataDir, "mayfly.yaml")) {
+		cfg, fromFile, err = config.Load(filepath.Join(cfg.DataDir, "mayfly.yaml"))
+		if err != nil {
+			log.Fatalf("configuration: %v", err)
+		}
+		if flags.dataDir != "" {
+			cfg.DataDir = flags.dataDir
+		}
+	}
 	if !fromFile {
 		logger.Warn("no configuration file found; running with built-in defaults",
 			"path", config.DefaultPath)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	authn, authz, authStats, startAuth, closeAuth := buildAuth(ctx, logger, cfg.Auth)
-	startAuth(ctx)
-	defer func() { _ = closeAuth() }()
-
-	st := buildStore(ctx, logger, cfg.Store.DSN)
-
-	listeners, err := buildListeners(cfg.Listeners)
+	masterKey, persisted, err := admin.LoadMasterKey(cfg.DataDir, logger)
 	if err != nil {
-		log.Fatalf("listener setup: %v", err)
+		log.Fatalf("master key: %v", err)
 	}
+	if !persisted && fromFile {
+		logger.Warn("the master key is ephemeral; console sessions invalidate on restart")
+	}
+
+	adminStore := buildAdminStore(cfg.Store.DSN)
+
+	// First-run detection (docs/design/setup.md section 2): initialized means
+	// a configuration file plus a console admin account. Memory-only runs
+	// cannot satisfy that across restarts, so they generate a random admin
+	// password printed to the log exactly once.
+	adminCount, err := adminStore.UserCount(ctx)
+	if err != nil {
+		log.Fatalf("admin store: %v", err)
+	}
+	initialized := fromFile && adminCount > 0
+	if fromFile && adminCount == 0 {
+		if _, memory := adminStore.(*admin.MemoryStore); memory {
+			password := randomPassword()
+			hash, err := admin.HashPassword(password)
+			if err != nil {
+				log.Fatalf("admin store: %v", err)
+			}
+			if err := adminStore.CreateUser(ctx, "admin", hash); err != nil {
+				log.Fatalf("admin store: %v", err)
+			}
+			logger.Warn("generated initial console admin credentials (shown once; configure a store to persist them)",
+				"username", "admin", "password", password)
+			initialized = true
+		}
+	}
+
+	// The data plane starts only after initialization; before that the
+	// broker is built without a store, auth chains or listeners so the
+	// management API can still report status.
+	var (
+		authn     hook.Authenticator = hook.NewAuthChain(hook.AllowAll{})
+		authz     hook.Gate          = hook.NewAuthzChain(hook.AllowAll{})
+		mgr       *auth.Manager
+		st        store.Store
+		listeners []listener.Listener
+	)
+	if initialized {
+		authn, authz, mgr = buildAuth(ctx, logger, cfg.Auth)
+		if mgr != nil {
+			mgr.Start(ctx)
+		}
+		st = buildStore(ctx, logger, cfg.Store.DSN)
+		listeners, err = buildListeners(cfg.Listeners)
+		if err != nil {
+			log.Fatalf("listener setup: %v", err)
+		}
+	} else {
+		logger.Warn("mayfly is not initialized; MQTT listeners are disabled, waiting for the setup wizard",
+			"console", cfg.Admin.Addr)
+	}
+
 	m := metrics.New(version)
 	b := broker.New(broker.Options{
 		MaxConnections:     cfg.Broker.MaxConnections,
@@ -237,24 +355,49 @@ func main() {
 		b.AddListener(l)
 	}
 
+	var authStats func() []auth.SourceStat
+	if mgr != nil {
+		authStats = mgr.Stats
+	}
+	adminAPI := admin.NewServer(admin.Options{
+		Logger:      logger,
+		Store:       adminStore,
+		MasterKey:   masterKey,
+		Version:     version,
+		Initialized: initialized,
+		Broker:      b,
+		AuthManager: mgr,
+		ApplyChains: func(nm *auth.Manager) {
+			authn, authz := chainViews(nm, nm.Config())
+			b.SetChains(authn, authz)
+		},
+		DataDir: cfg.DataDir,
+	})
+	defer func() { _ = adminAPI.Close() }()
+
 	// The $SYS publisher republishes the broker status as retained
 	// $SYS/broker/... messages on its cadence; a negative sys_interval
 	// disables it (docs/design/observability.md section 2).
-	sysPub := metrics.NewSysPublisher(m, metrics.SysOptions{
-		Interval: time.Duration(cfg.Metrics.SysInterval),
-		Publish:  func(topic string, payload []byte) error { return b.Publish(topic, payload, true) },
-		Refresh:  b.RefreshMetrics,
-		Logger:   logger,
-	})
-	go sysPub.Run(ctx)
+	if initialized {
+		sysPub := metrics.NewSysPublisher(m, metrics.SysOptions{
+			Interval: time.Duration(cfg.Metrics.SysInterval),
+			Publish:  func(topic string, payload []byte) error { return b.Publish(topic, payload, true) },
+			Refresh:  b.RefreshMetrics,
+			Logger:   logger,
+		})
+		go sysPub.Run(ctx)
+	}
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- b.Run(ctx) }()
+	if initialized {
+		go func() { errCh <- b.Run(ctx) }()
+	}
 
 	httpServer := &http.Server{
 		Addr: cfg.Admin.Addr,
 		Handler: server.New(server.Options{
 			MetricsHandler: metrics.NewHandler(m, metrics.PromOptions{AuthStats: authStats}),
+			APIRouter:      adminAPI,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

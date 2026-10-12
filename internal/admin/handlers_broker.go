@@ -201,8 +201,8 @@ func (s *Server) listSubscriptions(c echo.Context) error {
 // retainedJSON is the API view of one retained message with a bounded
 // payload preview.
 type retainedJSON struct {
-	Topic        string `json:"topic"`
-	PayloadSize  int    `json:"payload_size"`
+	Topic       string `json:"topic"`
+	PayloadSize int    `json:"payload_size"`
 	// PayloadPreview is the base64 of the first retainedPayloadPreview bytes.
 	PayloadPreview string `json:"payload_preview"`
 	Truncated      bool   `json:"truncated"`

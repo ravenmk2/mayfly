@@ -136,6 +136,12 @@ func hashPassword(password string) (string, error) {
 	return string(h), nil
 }
 
+// HashPassword hashes a console password with bcrypt. It is exported for the
+// generated initial admin of memory-only runs.
+func HashPassword(password string) (string, error) {
+	return hashPassword(password)
+}
+
 // timePtr maps the zero time to nil for optional JSON timestamps.
 func timePtr(t time.Time) *time.Time {
 	if t.IsZero() {

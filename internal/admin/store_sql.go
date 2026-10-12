@@ -274,9 +274,9 @@ type scanner interface {
 // scanAPIKey reads one api_key row.
 func scanAPIKey(s scanner) (APIKey, error) {
 	var (
-		k        APIKey
-		scopes   string
-		expires  sql.NullTime
+		k       APIKey
+		scopes  string
+		expires sql.NullTime
 	)
 	if err := s.Scan(&k.ID, &k.Name, &k.KeyHash, &k.Prefix, &scopes, &k.CreatedAt, &expires); err != nil {
 		return APIKey{}, err
