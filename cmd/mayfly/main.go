@@ -605,10 +605,12 @@ func runApp(ctx context.Context, flags cliFlags) error {
 		}
 	}()
 
+	var runErr error
 	select {
 	case err := <-errCh:
 		if err != nil {
 			logger.Error("mayfly stopped with error", "error", err)
+			runErr = err
 		}
 	case <-ctx.Done():
 	}
@@ -619,7 +621,7 @@ func runApp(ctx context.Context, flags cliFlags) error {
 	_ = httpServer.Shutdown(shutdownCtx)
 	_ = b.Close()
 	rt.closeStore()
-	return nil
+	return runErr
 }
 
 // dpManager unwraps the data plane's auth manager, nil before setup.
