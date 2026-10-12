@@ -18,10 +18,21 @@ export default defineConfig({
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-vue': ['vue', 'vue-router', 'pinia'],
-          'vendor-element': ['element-plus', '@element-plus/icons-vue'],
-          'vendor-echarts': ['echarts'],
+        // Vite 8 (rolldown) only accepts the function form.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return undefined;
+          }
+          if (id.includes('echarts') || id.includes('zrender')) {
+            return 'vendor-echarts';
+          }
+          if (id.includes('element-plus')) {
+            return 'vendor-element';
+          }
+          if (id.includes('/vue/') || id.includes('vue-router') || id.includes('pinia')) {
+            return 'vendor-vue';
+          }
+          return undefined;
         },
       },
     },
