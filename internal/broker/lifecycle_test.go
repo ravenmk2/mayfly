@@ -349,7 +349,10 @@ func TestResendInflightOnReconnect(t *testing.T) {
 }
 
 func TestOutboundBackpressureDropsQoS0(t *testing.T) {
-	s := newTestServer(t, func(o *Options) { o.OutboundQueueDepth = 4 })
+	// FlushInterval 0 makes the write loop flush immediately, so the flood
+	// cannot be absorbed by the batching window; the blocked pipe write then
+	// deterministically bounds buffering to 1 in flight plus 4 queue slots.
+	s := newTestServer(t, func(o *Options) { o.OutboundQueueDepth = 4; o.FlushInterval = 0 })
 	sub := dial(t, s).v3()
 	sub.connect("sub", true, packet.Properties{})
 	sub.subscribe(1, packet.Subscription{Filter: "flood", Qos: 0})
@@ -357,14 +360,14 @@ func TestOutboundBackpressureDropsQoS0(t *testing.T) {
 
 	pub := dial(t, s).v3()
 	pub.connect("pub", true, packet.Properties{})
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 100; i++ {
 		pub.publish(0, "flood", []byte("x"), 0, packet.Properties{})
 	}
 
-	// Four queue slots plus at most one in-flight write; the rest of the
-	// QoS 0 messages are dropped and counted (architecture section 3).
+	// One in-flight write plus four queue slots; the rest of the QoS 0
+	// messages are dropped and counted (architecture section 3).
 	require.Eventually(t, func() bool {
-		return s.Stats.MessagesDropped.Load() >= 15
+		return s.Stats.MessagesDropped.Load() >= 80
 	}, 2*time.Second, 10*time.Millisecond)
 }
 

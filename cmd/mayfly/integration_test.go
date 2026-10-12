@@ -178,12 +178,12 @@ func TestSetupHotActivationFlow(t *testing.T) {
 	// The swapped-in auth manager manages MQTT users on the primary database.
 	code, _ = httpJSON(t, http.MethodPost, base+"/users", token,
 		map[string]any{"username": "dev", "password": "dev-secret"})
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusCreated, code, "body: %v", body)
 
 	// The db authorization chain defaults to deny; grant dev access to it/#.
 	code, _ = httpJSON(t, http.MethodPost, base+"/acls", token,
 		map[string]any{"seq": 1, "username": "dev", "action": "allow", "permission": "pubsub", "topic": "it/#"})
-	require.Equal(t, http.StatusCreated, code)
+	require.Equal(t, http.StatusCreated, code, "body: %v", body)
 
 	// The MQTT listener came up; CONNECT authenticates against the db chain.
 	c := mqttDial(t, mqttAddr, "it-1", "dev", "dev-secret")
