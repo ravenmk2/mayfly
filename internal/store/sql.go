@@ -51,9 +51,19 @@ func openDB(dsn string) (*sql.DB, Backend, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("store: open sqlite: %w", err)
 		}
-		if rest == ":memory:" || strings.HasPrefix(rest, "file::memory:") {
-			// A pooled in-memory database vanishes per connection.
-			db.SetMaxOpenConns(1)
+		// Serialize access on one connection: the broker store, the auth
+		// source and the admin store may share one database file, and
+		// concurrent pooled writers race into SQLITE_BUSY errors. WAL plus a
+		// busy timeout guard against external lockers. A pooled in-memory
+		// database also vanishes per connection, so it needs this too.
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			_ = db.Close()
+			return nil, 0, fmt.Errorf("store: enable WAL: %w", err)
+		}
+		if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+			_ = db.Close()
+			return nil, 0, fmt.Errorf("store: set busy timeout: %w", err)
 		}
 		return db, BackendSQLite, nil
 	case "mysql":
